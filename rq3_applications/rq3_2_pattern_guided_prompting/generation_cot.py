@@ -9,7 +9,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from utils import api_defaults, append_result_to_file, call_api_stream, load_existing_task_ids, safe_print
 
-from prompt_utils import load_json_records, render_prompt, results_dir
+from prompt_utils import (
+    PROMPT_METHODS,
+    infer_prompt_variant,
+    load_json_records,
+    render_prompt,
+    results_dir,
+)
 
 sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
 
@@ -100,7 +106,12 @@ def main() -> None:
     parser.add_argument("--api_key", type=str, default=api["api_key"], help="API key")
     parser.add_argument("--model", type=str, default=api["model"], help="Model name")
     parser.add_argument("--data", type=str, default=str(project_root / "data" / "LCB" / "v4_v6.jsonl"))
-    parser.add_argument("--prompt_method", type=str, default="pattern_guided", choices=["default", "concise", "pattern_guided"])
+    parser.add_argument(
+        "--prompt_method",
+        type=str,
+        default="pattern_and_anti",
+        choices=PROMPT_METHODS,
+    )
     parser.add_argument("--prompt_variant", type=str, default="auto")
     parser.add_argument("--templates_path", type=str, default=str(script_dir / "prompt_templates.json"))
     parser.add_argument("--output_dir", type=str, default=None)
@@ -113,7 +124,14 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=1.0)
     args = parser.parse_args()
 
-    base_results_dir = results_dir(project_root, "generation", args.model)
+    resolved_variant = infer_prompt_variant(args.model, args.prompt_variant)
+    base_results_dir = results_dir(
+        project_root,
+        "generation",
+        args.model,
+        args.prompt_method,
+        resolved_variant,
+    )
     if args.output_dir is None:
         args.output_dir = str(base_results_dir / "txt_output")
     if args.save_path is None:

@@ -7,7 +7,13 @@ from string import Formatter
 
 
 DEFAULT_TEMPLATES_PATH = Path(__file__).parent / "prompt_templates.json"
-DEFAULT_PROMPT_METHOD = "pattern_guided"
+PROMPT_METHODS = (
+    "default",
+    "pattern_only",
+    "anti_pattern_only",
+    "pattern_and_anti",
+)
+DEFAULT_PROMPT_METHOD = "pattern_and_anti"
 
 
 def load_prompt_templates(path: str | Path | None = None) -> dict:
@@ -30,8 +36,24 @@ def sanitize_slug(text: str) -> str:
     return slug.strip("._-") or "unknown"
 
 
-def results_dir(root: Path, task: str, model: str) -> Path:
-    return root / "data" / "derived_cot" / "rq3_prompting" / "results" / task / sanitize_slug(model)
+def results_dir(
+    root: Path,
+    task: str,
+    model: str,
+    prompt_method: str,
+    prompt_variant: str,
+) -> Path:
+    return (
+        root
+        / "data"
+        / "derived_cot"
+        / "rq3_prompting"
+        / "results"
+        / task
+        / sanitize_slug(model)
+        / sanitize_slug(prompt_method)
+        / sanitize_slug(prompt_variant)
+    )
 
 
 def infer_prompt_variant(model_name: str, requested: str = "auto") -> str:
