@@ -1,0 +1,69 @@
+import random
+
+class MahjongConnect:
+    def __init__(self, board_size, icons):
+        self.BOARD_SIZE = board_size
+        self.ICONS = icons
+        self.board = self.create_board()
+
+    def create_board(self):
+        rows, cols = self.BOARD_SIZE
+        new_board = []
+        for i in range(rows):
+            row = []
+            for j in range(cols):
+                row.append(random.choice(self.ICONS))
+            new_board.append(row)
+        return new_board
+
+    def is_valid_move(self, pos1, pos2):
+        x1, y1 = pos1
+        x2, y2 = pos2
+        rows, cols = self.BOARD_SIZE
+
+        if not (0 <= x1 < rows and 0 <= y1 < cols and
+                0 <= x2 < rows and 0 <= y2 < cols):
+            return False
+
+        if pos1 == pos2:
+            return False
+
+        if self.board[x1][y1] != self.board[x2][y2]:
+            return False
+
+        return self.has_path(pos1, pos2)
+
+    def has_path(self, pos1, pos2):
+        visited = set()
+        stack = [pos1]
+
+        while stack:
+            current_pos = stack.pop()
+
+            if current_pos == pos2:
+                return True
+
+            if current_pos in visited:
+                continue
+
+            visited.add(current_pos)
+            x, y = current_pos
+
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                new_x, new_y = x + dx, y + dy
+                if 0 <= new_x < self.BOARD_SIZE[0] and 0 <= new_y < self.BOARD_SIZE[1]:
+                    if (new_x, new_y) not in visited and self.board[new_x][new_y] == self.board[x][y]:
+                        stack.append((new_x, new_y))
+
+        return False
+
+    def remove_icons(self, pos1, pos2):
+        self.board[pos1[0]][pos1[1]] = ' '
+        self.board[pos2[0]][pos2[1]] = ' '
+
+    def is_game_over(self):
+        for row in self.board:
+            for icon in row:
+                if icon != ' ':
+                    return False
+        return True

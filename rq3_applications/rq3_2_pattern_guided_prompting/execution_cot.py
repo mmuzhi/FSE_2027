@@ -129,10 +129,10 @@ def main() -> None:
     parser.add_argument(
         "--prompt_method",
         type=str,
-        default="pattern_only",
+        default="pattern_and_anti",
         choices=PROMPT_METHODS,
     )
-    parser.add_argument("--prompt_variant", type=str, default="qwen")
+    parser.add_argument("--prompt_variant", type=str, default="r1")
     parser.add_argument("--templates_path", type=str, default=str(script_dir / "prompt_templates.json"))
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_path", type=str, default=None)

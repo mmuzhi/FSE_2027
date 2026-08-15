@@ -1,0 +1,46 @@
+from typing import List
+from collections import defaultdict
+
+class Solution:
+    def maxPower(self, stations: List[int], r: int, k: int) -> int:
+        start, end = min(stations), sum(stations) + k
+        while start + 1 < end:
+            mid = (start + end) // 2
+            if self.check(stations, r, k, mid):
+                start = mid
+            else:
+                end = mid
+        if self.check(stations, r, k, end):
+            return end
+        return start
+
+    def check(self, stations, r, k, target):
+        n = len(stations)
+        ans = True
+        newStations = defaultdict(int)
+        power = sum(stations[:r])
+
+        for i in range(n):
+            if i + r < n:
+                power += stations[i + r]
+            if i - r - 1 >= 0:
+                power -= stations[i - r - 1]
+
+            if power >= target:
+                continue
+
+            if power + k < target:
+                ans = False
+                break
+
+            diff = target - power
+            power = target
+            j = min(i + r, n - 1)
+            stations[j] += diff
+            k -= diff
+            newStations[j] += diff
+
+        for i in newStations:
+            stations[i] -= newStations[i]
+
+        return ans
