@@ -1,0 +1,284 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class NLPDataProcessor {
+
+    public List<String> constructStopWordList() {
+        return Arrays.asList("a", "an", "the");
+    }
+
+    public List<List<String>> removeStopWords(List<String> stringList, List<String> stopWordList) {
+        List<List<String>> result = new ArrayList<>();
+        for (String string : stringList) {
+            List<String> words = new ArrayList<>(Arrays.asList(string.split(" ")));
+            words.removeAll(stopWordList);
+            result.add(words);
+        }
+        return result;
+    }
+
+    public List<List<String>> process(List<String> stringList) {
+        List<String> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to py.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic py only when it does not change behavior.
+
+```java
+package org.example;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class NLPDataProcessor {
+
+    public List<String> constructStopWordList() {
+        return Arrays.asList("a", "an", "the");
+    }
+
+    public List<List<String>> removeStopWords(List<String> stringList, List<String> stopWordList) {
+        List<List<String>> result = new ArrayList<>();
+        for (String string : stringList) {
+            List<String> words = new ArrayList<>(Arrays.asList(string.split(" ")));
+            words.removeAll(stopWordList);
+            result.add(words);
+        }
+        return result;
+    }
+
+    public List<List<String>> process(List<String> stringList) {
+        List<String> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+}
+```
+
+Use a short stable mapping path that preserves behavior.
+
+Keep the reasoning compact and single-pass:
+- Identify only the pieces that must remain equivalent: signatures, I/O contract, stateful behavior, control flow, and key API semantics.
+- Turn that mapping into target-language structure promptly.
+- Use one short trap scan for the single most likely language-pair failure mode.
+- If a mismatch appears, patch only the affected local section and recheck once.
+- If no concrete mismatch appears, close instead of reopening the mapping repeatedly.
+
+Try to avoid:
+- bouncing between partial code and repeated redesign;
+- reopening the mapping for every local implementation detail;
+- expanding one local translation doubt into a full restructuring cycle.
+
+Output only the translated py code in a code block.
+
+=== REASONING ===
+<think>
+Let me analyze the Java code:
+
+1. `constructStopWordList()` returns a fixed list ["a", "an", "the"].
+2. `removeStopWords(stringList, stopWordList)` - splits each string by " ", removes stop words, adds to result.
+3. `process(stringList)` - combines the two.
+
+Key semantics to preserve:
+- `split(" ")` in Java: splits on single spaces, keeps empty strings, removes trailing empty strings. Python's `split(" ")` behaves the same: `"a b".split(" ")` → `["a", "b"]`, `"a  b".split(" ")` → `["a", "", "b"]`, `"a ".split(" ")` → `["a"]` (trailing empties removed). Wait — Python's `"a ".split(" ")` → `["a", ""]`? Let me check.
+
+Python: `"a ".split(" ")` → `['a', '']`. Hmm, actually Python's `str.split(" ")` with explicit separator keeps trailing empty strings? Let me verify: `"a ".split(" ")` gives `['a', '']`. Yes, Python keeps trailing empty strings when an explicit separator is given: `"a,,,".split(",")` → `['a', '', '', '']`.
+
+Java: `"a ".split(" ")` → `["a"]` — Java's split removes trailing empty strings by default (limit=0).
+
+So there's a mismatch on trailing empties. E.g., "the a " in Java: split → ["the", "a"] (trailing empty removed), then remove stop words → []. In Python: "the a ".split(" ") → ["the", "a", ""], remove stopwords → [""].
+
+To match Java behavior: use `re.split` won't help. Better: replicate Java's split by removing trailing empty strings. Java's split with limit 0 discards trailing empty strings. So Python equivalent:
+
+```python
+def java_split(s, sep):
+    parts = s.split(sep)
+    while parts and parts[-1] == "":
+        parts.pop()
+    return parts
+```
+
+Wait, but there's also an edge case: Java's `"".split(" ")` returns `[""]` (array with one empty string) — because split on empty string returns array containing the empty string. Actually `"".split(" ")` in Java returns `[""]`. Yes: `"".split(" ")` gives array of length 1 containing "". Python `"".split(" ")` gives `[""]`. Same. But after removing trailing empties with my helper, `""` would become `[]`... Hmm, Java: `"".split(" ")` → `[""]` — trailing empty removal? Java's split implementation: if the input is empty, it returns `[""]` (single-element array with the input). Let me check: `"".split(",")` in Java returns `[""]` — array of length 1. Yes, that's special-cased: Java returns an array containing the original string if no match occurs... Actually, Java's split: if no match found, returns single-element array with input. For empty input `""`, `"".split(",")` returns `[""]`. Yes.
+
+So Java: `"".split(" ")` → `[""]`. My helper removing trailing empties would turn `[""]` into `[]`, which differs. Java's trailing-empty removal only applies when at least one match occurred? Let me think: Java's `String.split` with limit 0: "If n is zero then the pattern will be applied as many times as possible, the array can have any length, and trailing empty strings will be discarded."
+
+For `"".split(",")`: the result is `[""]`. This is because the split of empty string — the algorithm computes index of first match; no match, so returns single-element array containing input. The trailing empty discard happens in the loop where matches were found. Java implementation:
+
+```java
+public String[] split(String regex, int limit) {
+    ...
+    // fastpath
+    ...
+    int index = 0;
+    boolean matchLimited = limit > 0;
+    ArrayList<String> matchList = new ArrayList<>();
+    Matcher m = matcher(regex);
+    while(m.find()) {
+        if (!matchLimited || matchList.size() < limit - 1) {
+            if (index == 0 && index == m.start() && m.start() == m.end()) {
+                // no empty leading substring included for zero-width match
+                // at the beginning of the input char sequence.
+                continue;
+            }
+            String match = input.subSequence(index, m.start()).toString();
+            matchList.add(match);
+            index = m.end();
+        } ...
+    }
+    // If no match was found, return this
+    if (index == 0)
+        return new String[] {input.toString()};
+    ...
+    // Add remaining segment
+    if (!matchLimited || matchList.size() < limit)
+        matchList.add(input.subSequence(index, input.length()).toString());
+    // Construct result
+    ...
+    if (limit == 0)
+        while (resultSize > 0 && matchList.get(resultSize-1).isEmpty())
+            resultSize--;
+```
+
+So for `""`: no match found (index==0), returns `[""]`. So `"".split(" ")` → `[""]`.
+
+For `" "` (single space): match found at 0, adds "" (leading empty), index=1; no more matches; remaining segment from 1 to 1 is "". Add "". Then trailing empty removal: resultSize 2 → removes both empties → result `[]`. So `" ".split(" ")` → `[]` (empty array, length 0).
+
+Python: `" ".split(" ")` → `["", ""]`. My trailing-empties helper: `["", ""]` → `[]`. Matches Java.
+
+For `""`: Python gives `[""]`; helper would give `[]` — mismatch with Java's `[""]`. To handle: if no separator match occurred (i.e., the split produced exactly one element equal to the whole string... hmm, but `"a".split(" ")` → `["a"]`, Java also `["a"]`, and helper doesn't change since "a" isn't empty). The only problematic case: input `""` → Python `[""]` → helper removes → `[]`, Java `[""]`.
+
+So special case: `if s == "": return [""]`.
+
+Let me write:
+
+```python
+def _java_split_space(s):
+    if s == "":
+        return [""]
+    parts = s.split(" ")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return parts
+```
+
+Wait, for non-empty s containing at least one non-trailing-empty part, this works. E.g., `"a "` → `["a", ""]` → `["a"]`. Java: `["a"]`. ✓. `"a  "` → `["a", "", ""]` → `["a"]`. Java: `["a"]`. ✓.
+
+Edge: `s` contains only spaces, `"   "` → Python `["","","",""]` → helper → `[]`. Java: `[]`. ✓.
+
+Then removal: `words.removeAll(stopWordList)` removes all occurrences of any element in stopWordList. Python equivalent: `[w for w in words if w not in stop_word_list]`. Since stopWordList is ["a","an","the"], membership is fine. To be exact, `removeAll` removes elements equal to any in stopWordList. List comprehension with `not in` is correct.
+
+Return type: Java returns List<List<String>>. Python: list of lists.
+
+Also, Java's `Arrays.asList` returns a fixed-size list; `removeAll` on that would throw, but they copy into ArrayList first — fine, no behavioral difference in Python.
+
+Also `Arrays.asList("a","an","the")` — no mutation done on stopWordList, so a plain list is fine.
+
+Class structure: translate to a Python class `NLPDataProcessor` with same method names.
+
+Now the trap scan: the split trailing-empty difference is the main Java↔Python failure mode, handled. Another: `removeAll` semantics — handled with list comprehension. Null inputs: Java would throw NullPointerException on stringList=null when iterating. Python iterating None raises TypeError — both raise exceptions; behavior "identical exceptions" — Java NPE vs Python TypeError; not strictly identical but this is the idiomatic mapping. The prompt says keep behavior identical including exceptions — but None handling: Java `removeStopWords(null, ...)` → NPE at for-each. Python `for s in None` → TypeError. Close enough for typical translation; I won't add null checks.
+
+Let me write the final code:
+
+```python
+class NLPDataProcessor:
+
+    def construct_stop_word_list(self):
+        return ["a", "an", "the"]
+
+    @staticmethod
+    def _java_split(string, sep=" "):
+        # Java's String.split drops trailing empty strings (except for the
+        # empty input, which yields [""]).
+        if string == "":
+            return [""]
+        parts = string.split(sep)
+        while parts and parts[-1] == "":
+            parts.pop()
+        return parts
+
+    def remove_stop_words(self, string_list, stop_word_list):
+        result = []
+        for string in string_list:
+            words = [w for w in self._java_split(string) if w not in stop_word_list]
+            result.append(words)
+        return result
+
+    def process(self, string_list):
+        stop_word_list = self.construct_stop_word_list()
+        return self.remove_stop_words(string_list, stop_word_list)
+```
+
+Hmm, should I name the helper as a static method or module-level function? Keep it inside the class as a static helper — fine. Or simpler inline. I'll keep the helper.
+
+Double-check `removeAll` — it's `List.removeAll(Collection)` which removes from `words` all elements contained in stopWordList. The list comprehension does that. ✓
+
+Output only the code block.
+</think>
+
+=== RAW ANSWER ===
+```python
+class NLPDataProcessor:
+
+    def construct_stop_word_list(self):
+        return ["a", "an", "the"]
+
+    @staticmethod
+    def _java_split(string):
+        # Java's String.split(" ") discards trailing empty strings,
+        # except for empty input, which yields [""].
+        if string == "":
+            return [""]
+        parts = string.split(" ")
+        while parts and parts[-1] == "":
+            parts.pop()
+        return parts
+
+    def remove_stop_words(self, string_list, stop_word_list):
+        result = []
+        for string in string_list:
+            words = [w for w in self._java_split(string) if w not in stop_word_list]
+            result.append(words)
+        return result
+
+    def process(self, string_list):
+        stop_word_list = self.construct_stop_word_list()
+        return self.remove_stop_words(string_list, stop_word_list)
+```
+
+=== TRANSLATED CODE (py) ===
+class NLPDataProcessor:
+
+    def construct_stop_word_list(self):
+        return ["a", "an", "the"]
+
+    @staticmethod
+    def _java_split(string):
+        # Java's String.split(" ") discards trailing empty strings,
+        # except for empty input, which yields [""].
+        if string == "":
+            return [""]
+        parts = string.split(" ")
+        while parts and parts[-1] == "":
+            parts.pop()
+        return parts
+
+    def remove_stop_words(self, string_list, stop_word_list):
+        result = []
+        for string in string_list:
+            words = [w for w in self._java_split(string) if w not in stop_word_list]
+            result.append(words)
+        return result
+
+    def process(self, string_list):
+        stop_word_list = self.construct_stop_word_list()
+        return self.remove_stop_words(string_list, stop_word_list)

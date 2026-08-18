@@ -1,0 +1,30 @@
+import collections
+
+
+class Solution:
+    def kSimilarity(self, s1: str, s2: str) -> int:
+        queue = collections.deque([s1])
+        seen = set()
+        answ = 0
+
+        while queue:
+            for _ in range(len(queue)):
+                string = queue.popleft()
+                if string == s2:
+                    return answ
+
+                i = 0
+                while string[i] == s2[i]:
+                    i += 1
+
+                for j in range(i + 1, len(string)):
+                    if string[j] == s2[i] and string[j] != s2[j]:
+                        new = string[:i] + string[j] + string[i + 1:j] + string[i] + string[j + 1:]
+
+                        if new not in seen:
+                            seen.add(new)
+                            queue.append(new)
+
+            answ += 1
+
+        return answ

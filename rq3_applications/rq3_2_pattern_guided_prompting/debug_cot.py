@@ -131,7 +131,7 @@ def main() -> None:
     parser.add_argument(
         "--prompt_method",
         type=str,
-        default="pattern_only",
+        default="pattern_and_anti",
         choices=PROMPT_METHODS,
     )
     parser.add_argument("--prompt_variant", type=str, default="r1")

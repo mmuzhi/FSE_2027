@@ -1,0 +1,322 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+import java.io.*;
+import java.nio.file.*;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class TextFileProcessor {
+    private String file_path;
+
+    public TextFileProcessor(String file_path) {
+        this.file_path = file_path;
+    }
+
+    public Object read_file_as_json() throws IOException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        return objectMapper.readValue(new File(file_path), Object.class);
+    }
+
+    public String read_file() throws IOException {
+        return new String(Files.readAllBytes(Paths.get(file_path)));
+    }
+
+    public void write_file(String content) throws IOException {
+        Files.write(Paths.get(file_path), content.getBytes());
+    }
+
+    public String process_file() throws IOException {
+        String content = read_file();
+        String processedContent = content.replaceAll("[^a-zA-Z]", "");
+        write_file(processedContent);
+        return processedContent;
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to cpp.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic cpp only when it does not change behavior.
+
+```java
+package org.example;
+
+import java.io.*;
+import java.nio.file.*;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class TextFileProcessor {
+    private String file_path;
+
+    public TextFileProcessor(String file_path) {
+        this.file_path = file_path;
+    }
+
+    public Object read_file_as_json() throws IOException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        return objectMapper.readValue(new File(file_path), Object.class);
+    }
+
+    public String read_file() throws IOException {
+        return new String(Files.readAllBytes(Paths.get(file_path)));
+    }
+
+    public void write_file(String content) throws IOException {
+        Files.write(Paths.get(file_path), content.getBytes());
+    }
+
+    public String process_file() throws IOException {
+        String content = read_file();
+        String processedContent = content.replaceAll("[^a-zA-Z]", "");
+        write_file(processedContent);
+        return processedContent;
+    }
+}
+```
+
+Use a short stable mapping path that preserves behavior.
+
+Keep the reasoning compact and single-pass:
+- Identify only the pieces that must remain equivalent: signatures, I/O contract, stateful behavior, control flow, and key API semantics.
+- Turn that mapping into target-language structure promptly.
+- Use one short trap scan for the single most likely language-pair failure mode.
+- If a mismatch appears, patch only the affected local section and recheck once.
+- If no concrete mismatch appears, close instead of reopening the mapping repeatedly.
+
+Try to avoid:
+- bouncing between partial code and repeated redesign;
+- reopening the mapping for every local implementation detail;
+- expanding one local translation doubt into a full restructuring cycle.
+
+Output only the translated cpp code in a code block.
+
+=== REASONING ===
+<think>
+Let me analyze the Java code to translate to C++:
+
+1. `TextFileProcessor` class with a `file_path` string field
+2. `read_file_as_json()` - reads file and parses JSON, returning Object (generic)
+3. `read_file()` - reads all bytes and returns as string
+4. `write_file(String content)` - writes string bytes to file
+5. `process_file()` - reads file, removes all non-alphabetic chars, writes back, returns processed content
+
+Key mappings:
+- Java `String` → `std::string`
+- `Files.readAllBytes` → `std::ifstream` reading binary, or read whole file
+- `Files.write` → `std::ofstream` (note: Java's `Files.write` default options TRUNCATE_EXISTING and CREATE)
+- `replaceAll("[^a-zA-Z]", "")` → remove chars not in [a-zA-Z] — can do with regex `std::regex` or manual loop. Manual loop is simpler and exact: `[^a-zA-Z]` matches any char not a-z/A-Z. With regex on bytes vs Java chars — Java regex operates on UTF-16 chars; `[^a-zA-Z]` matches any char that isn't ASCII letter. In C++ with std::string (bytes), removing bytes not in [a-zA-Z] differs for multi-byte UTF-8: Java would remove non-ASCII characters entirely (each char), C++ byte-wise removal would also remove non-ASCII bytes since they're >127, not in a-zA-Z. So behavior on UTF-8 input: Java reads as UTF-8 via new String(bytes)? Actually `new String(bytes)` uses default charset. Non-ASCII chars get removed in both cases. Byte-wise removal of non-[a-zA-Z] bytes for UTF-8 gives the same result as char-wise removal of non-ASCII letters, since all continuation bytes are >= 0x80 and get removed, and base bytes too. So a simple filter loop matches behavior for UTF-8 input. Good.
+
+For JSON: need a JSON library. Idiomatic C++ without external deps: could use nlohmann/json. The Java returns `Object` which can be Map/List/String/etc. In C++, `nlohmann::json` is the closest analog. Alternatively return `nlohmann::json`. Or use a variant. Since Java uses Jackson, the C++ analog is nlohmann::json.
+
+Exceptions: Java IOException → C++ std::runtime_error or std::ios_base::failure. I'll throw std::runtime_error on file open failure to mimic IOException behavior (Jackson would throw IOException if file doesn't exist).
+
+`write_file`: Java `Files.write` with default options: CREATE, TRUNCATE_EXISTING, WRITE. So overwrite the file. `std::ofstream` default is trunc. `content.getBytes()` uses default charset — for ASCII it's the same bytes. We just write the string bytes.
+
+`read_file`: `new String(Files.readAllBytes(...))` decodes with default charset; in C++ we just read bytes into std::string — identical for ASCII/binary pass-through. Fine.
+
+Structure: header-ish single file. I'll produce a single .cpp with class TextFileProcessor, methods returning std::string etc. Constructor stores path.
+
+Trap scan: The most likely failure mode — Java `replaceAll` uses regex; naive translation might use `std::regex_replace` which is fine, but the simpler safe mapping is a filter loop preserving only ASCII letters, equivalent for the reason above. Another trap: `Files.write` truncates — ofstream default does truncate. Another: reading file — must read binary to preserve bytes.
+
+Let me write the code:
+
+```cpp
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+class TextFileProcessor {
+private:
+    std::string file_path;
+
+public:
+    explicit TextFileProcessor(const std::string& file_path)
+        : file_path(file_path) {}
+
+    nlohmann::json read_file_as_json() const {
+        return nlohmann::json::parse(read_file());
+    }
+
+    std::string read_file() const {
+        std::ifstream in(file_path, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("IOException: cannot open file for reading: " + file_path);
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    }
+
+    void write_file(const std::string& content) const {
+        std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("IOException: cannot open file for writing: " + file_path);
+        }
+        out << content;
+        // flush/close; ofstream destructor handles it, but check failure
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("IOException: failed writing file: " + file_path);
+        }
+    }
+
+    std::string process_file() {
+        std::string content = read_file();
+        std::string processedContent;
+        for (unsigned char c : content) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                processedContent += static_cast<char>(c);
+            }
+        }
+        write_file(processedContent);
+        return processedContent;
+    }
+};
+```
+
+Note: Java's `readValue(new File(...))` throws if malformed JSON — `nlohmann::json::parse` throws json::parse_error, matching spirit. Good.
+
+One subtlety: Java readValue maps to Object: JSON object → LinkedHashMap, array → ArrayList, etc. nlohmann::json is the idiomatic generic. Acceptable.
+
+Output only the code block.
+</think>
+
+=== RAW ANSWER ===
+```cpp
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+class TextFileProcessor {
+private:
+    std::string file_path;
+
+public:
+    explicit TextFileProcessor(const std::string& file_path)
+        : file_path(file_path) {}
+
+    // Java: Jackson readValue into Object -> generic JSON value (throws on malformed input, like Jackson)
+    nlohmann::json read_file_as_json() const {
+        return nlohmann::json::parse(read_file());
+    }
+
+    // Java: new String(Files.readAllBytes(...)) -> raw byte-preserving read
+    std::string read_file() const {
+        std::ifstream in(file_path, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("IOException: cannot open file for reading: " + file_path);
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        if (!in && !in.eof()) {
+            throw std::runtime_error("IOException: failed reading file: " + file_path);
+        }
+        return ss.str();
+    }
+
+    // Java: Files.write with default options (CREATE, TRUNCATE_EXISTING, WRITE)
+    void write_file(const std::string& content) const {
+        std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("IOException: cannot open file for writing: " + file_path);
+        }
+        out << content;
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("IOException: failed writing file: " + file_path);
+        }
+    }
+
+    // Java: replaceAll("[^a-zA-Z]", "") -> keep only ASCII letters
+    // Byte-wise filtering matches Java's char-wise result for UTF-8 input:
+    // all non-ASCII bytes (>= 0x80) are dropped either way.
+    std::string process_file() {
+        std::string content = read_file();
+        std::string processedContent;
+        processedContent.reserve(content.size());
+        for (unsigned char c : content) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                processedContent += static_cast<char>(c);
+            }
+        }
+        write_file(processedContent);
+        return processedContent;
+    }
+};
+```
+
+=== TRANSLATED CODE (cpp) ===
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+class TextFileProcessor {
+private:
+    std::string file_path;
+
+public:
+    explicit TextFileProcessor(const std::string& file_path)
+        : file_path(file_path) {}
+
+    // Java: Jackson readValue into Object -> generic JSON value (throws on malformed input, like Jackson)
+    nlohmann::json read_file_as_json() const {
+        return nlohmann::json::parse(read_file());
+    }
+
+    // Java: new String(Files.readAllBytes(...)) -> raw byte-preserving read
+    std::string read_file() const {
+        std::ifstream in(file_path, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("IOException: cannot open file for reading: " + file_path);
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        if (!in && !in.eof()) {
+            throw std::runtime_error("IOException: failed reading file: " + file_path);
+        }
+        return ss.str();
+    }
+
+    // Java: Files.write with default options (CREATE, TRUNCATE_EXISTING, WRITE)
+    void write_file(const std::string& content) const {
+        std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("IOException: cannot open file for writing: " + file_path);
+        }
+        out << content;
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("IOException: failed writing file: " + file_path);
+        }
+    }
+
+    // Java: replaceAll("[^a-zA-Z]", "") -> keep only ASCII letters
+    // Byte-wise filtering matches Java's char-wise result for UTF-8 input:
+    // all non-ASCII bytes (>= 0x80) are dropped either way.
+    std::string process_file() {
+        std::string content = read_file();
+        std::string processedContent;
+        processedContent.reserve(content.size());
+        for (unsigned char c : content) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                processedContent += static_cast<char>(c);
+            }
+        }
+        write_file(processedContent);
+        return processedContent;
+    }
+};

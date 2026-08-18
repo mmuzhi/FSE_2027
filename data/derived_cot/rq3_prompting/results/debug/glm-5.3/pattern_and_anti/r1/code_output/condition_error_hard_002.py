@@ -1,0 +1,23 @@
+from collections import defaultdict
+
+class Solution:
+    def numPermsDISequence(self, s: str) -> int:
+        MOD = 10 ** 9 + 7
+        mem = defaultdict(int)
+
+        def dfs(i, val=0):
+            if i == len(s):
+                return 1
+            if (i, val) in mem:
+                return mem[i, val]
+            p = 0
+            if s[i] == "D":
+                for ind in range(0, val + 1):
+                    p = (p + dfs(i + 1, ind)) % MOD
+            else:
+                for ind in range(val + 1, i + 2):
+                    p = (p + dfs(i + 1, ind)) % MOD
+            mem[i, val] = p
+            return p
+
+        return dfs(0)

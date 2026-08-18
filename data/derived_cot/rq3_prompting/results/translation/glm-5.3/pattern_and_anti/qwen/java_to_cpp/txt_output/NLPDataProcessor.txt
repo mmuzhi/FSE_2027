@@ -1,0 +1,367 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class NLPDataProcessor {
+
+    public List<String> constructStopWordList() {
+        return Arrays.asList("a", "an", "the");
+    }
+
+    public List<List<String>> removeStopWords(List<String> stringList, List<String> stopWordList) {
+        List<List<String>> result = new ArrayList<>();
+        for (String string : stringList) {
+            List<String> words = new ArrayList<>(Arrays.asList(string.split(" ")));
+            words.removeAll(stopWordList);
+            result.add(words);
+        }
+        return result;
+    }
+
+    public List<List<String>> process(List<String> stringList) {
+        List<String> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to cpp.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic cpp only when it does not change behavior.
+
+```java
+package org.example;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class NLPDataProcessor {
+
+    public List<String> constructStopWordList() {
+        return Arrays.asList("a", "an", "the");
+    }
+
+    public List<List<String>> removeStopWords(List<String> stringList, List<String> stopWordList) {
+        List<List<String>> result = new ArrayList<>();
+        for (String string : stringList) {
+            List<String> words = new ArrayList<>(Arrays.asList(string.split(" ")));
+            words.removeAll(stopWordList);
+            result.add(words);
+        }
+        return result;
+    }
+
+    public List<List<String>> process(List<String> stringList) {
+        List<String> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+}
+```
+
+Use a short stable mapping path that preserves behavior.
+
+Keep the reasoning compact and single-pass:
+- Identify only the pieces that must remain equivalent: signatures, I/O contract, stateful behavior, control flow, and key API semantics.
+- Turn that mapping into target-language structure promptly.
+- Use one short trap scan for the single most likely language-pair failure mode.
+- If a mismatch appears, patch only the affected local section and recheck once.
+- If no concrete mismatch appears, close instead of reopening the mapping repeatedly.
+
+Try to avoid:
+- bouncing between partial code and repeated redesign;
+- reopening the mapping for every local implementation detail;
+- expanding one local translation doubt into a full restructuring cycle.
+
+Output only the translated cpp code in a code block.
+
+=== REASONING ===
+<think>
+Let me analyze the Java code:
+
+1. `constructStopWordList()` returns a fixed-size list backed by `Arrays.asList("a", "an", "the")`. It's a list view of an array — fixed size but settable. In C++, a `std::vector<std::string>` works.
+
+2. `removeStopWords(stringList, stopWordList)`:
+   - For each string, split by " " (single space) — Java's `split(" ")` with a single-char non-regex-special delimiter behaves like splitting on each space character, removing trailing empty strings but keeping interior empty strings.
+   - `Arrays.asList(string.split(" "))` creates list.
+   - `words.removeAll(stopWordList)` removes all elements equal to any stop word.
+   - Adds to result.
+
+Key trap: Java's `String.split(" ")` removes trailing empty strings. E.g., `"a b ".split(" ")` → `["a", "b"]`. Also `"a  b".split(" ")` → `["a", "", "b"]`. And `"".split(" ")` → `[""]` (single empty string). I need to replicate this in C++.
+
+Also `removeAll` removes elements equal to stop words — empty strings are not stop words so they remain.
+
+Let me write the C++:
+
+```cpp
+#include <string>
+#include <vector>
+#include <sstream>
+
+class NLPDataProcessor {
+public:
+    std::vector<std::string> constructStopWordList() {
+        return {"a", "an", "the"};
+    }
+
+    std::vector<std::vector<std::string>> removeStopWords(const std::vector<std::string>& stringList,
+                                                          const std::vector<std::string>& stopWordList) {
+        std::vector<std::vector<std::string>> result;
+        for (const auto& str : stringList) {
+            std::vector<std::string> words;
+            // Split on " " like Java's String.split(" "): removes trailing empty strings.
+            size_t start = 0;
+            size_t end;
+            std::vector<std::string> parts;
+            while ((end = str.find(' ', start)) != std::string::npos) {
+                parts.push_back(str.substr(start, end - start));
+                start = end + 1;
+            }
+            // Remove trailing empty strings (Java split semantics)
+            while (!parts.empty() && parts.back().empty()) {
+                parts.pop_back();
+            }
+            // Add the last segment if non-empty (after trailing removal, if the remainder is non-empty)
+            ...
+        }
+    }
+};
+```
+
+Wait, careful with Java's split semantics. `split(" ")` with limit 0: splits around each match of the single-space regex, trailing empty strings removed.
+
+Java: `"a b c".split(" ")` → ["a","b","c"]. `"a  b".split(" ")` → ["a","","b"]. `"a b ".split(" ")` → ["a","b"]. `" ".split(" ")` → [] (empty array!). Actually `" ".split(" ")` returns an empty array? Let's check: " " has one match. The algorithm: substrings around matches: prefix "" and suffix "". Both empty → trailing empties removed → result is empty array. Yes, `" ".split(" ")` returns `[]`... hmm, actually let me double check. Java's `"".split(",")` returns `[""]` (array with one empty string). And `" ".split(" ")` returns `[]`? Let me think.
+
+Java's split implementation (in openjdk): it uses `fastpath` for single-char non-special delimiter. The fastpath: iterates over the string, finds matches, adds substrings to ArrayList. After loop, if next < len, adds substring(next). If next == len (i.e., string ends with delimiter), the last element added... Let me recall precisely.
+
+fastPathSplit source (JDK 8+):
+
+```java
+private String[] fastpathSplit(String regex, int limit) {
+    char ch = regex.charAt(0);
+    ...
+    String del = String.valueOf(ch);
+    int off = 0;
+    int next;
+    boolean limited = limit > 0;
+    ArrayList<String> list = new ArrayList<>();
+    while ((next = src.indexOf(del, off)) != -1) {
+        if (!limited || list.size() < limit - 1) {
+            list.add(src.substring(off, next));
+            off = next + del.length();
+        } else {    // last one
+            list.add(src.substring(off));
+            off = src.length();
+            break;
+        }
+    }
+    // If no match was found, return this
+    if (off == 0)
+        return new String[]{this};
+
+    // Add remaining segment
+    if (!limited || list.size() < limit)
+        list.add(src.substring(off));
+
+    // Construct result
+    int resultSize = list.size();
+    if (limit == 0)
+        while (resultSize > 0 && list.get(resultSize - 1).isEmpty())
+            resultSize--;
+    ...
+}
+```
+
+So for `" "` (single space): off=0, next=0 (index of ' ' at 0). list.add(substring(0,0)) = "". off=1. Loop: indexOf(' ', 1) = -1. off != 0, so add remaining: substring(1) = "". list = ["", ""]. limit==0, remove trailing empties: resultSize → 0. Result: empty array []. So yes, `" ".split(" ")` → `[]`.
+
+And `"".split(" ")`: indexOf returns -1, off stays 0 → `if (off == 0) return new String[]{this}` → [""] (array with one empty string). So `""` splits to [""].
+
+`"a b "` : matches at 1 and 3. list: "a", "b". off=4 == len. Add remaining: substring(4) = "". list = ["a","b",""]. Remove trailing empties → ["a","b"]. ✓
+
+`"  "` (two spaces): matches at 0 and 1. list: "", "". off=2 == len. Add remaining substring(2)="" → ["","",""]. Remove trailing → []. 
+
+So the algorithm: split into all parts (including last segment after final delimiter), then remove trailing empty parts. Note: if no delimiter found at all, result is [whole string] (even if whole string is empty → [""]).
+
+Wait — if no match found, return [this]. That's same as: parts = [whole string], remove trailing empties... but if whole string is empty, removing trailing empties would give [], whereas Java gives [""]. Hmm! Important edge case: `"".split(" ")` → [""]. Because of `if (off == 0) return new String[]{this};` — this early-return happens before trailing-empty removal.
+
+So: if string contains no ' ' at all → result is [string] regardless (even empty string). If string contains at least one ' ', split normally, add remainder, then strip trailing empties.
+
+Let me verify: `"a"` no space → ["a"]. ✓. `""` no space → [""]. ✓.
+
+Another: `"a "` → match at 1: list ["a"], off=2=len, add remaining substring(2)="" → ["a",""] → strip trailing → ["a"]. ✓
+
+`" a"` → match at 0: list [""], off=1. no more matches. off != 0, add remaining "a" → ["", "a"]. trailing not empty → ["","a"]. ✓ Java gives ["", "a"]. Correct.
+
+Now implement in C++:
+
+```cpp
+std::vector<std::string> javaSplitSpace(const std::string& s) {
+    if (s.find(' ') == std::string::npos) {
+        return {s};
+    }
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        size_t end = s.find(' ', start);
+        if (end == std::string::npos) break;
+        parts.push_back(s.substr(start, end - start));
+        start = end + 1;
+    }
+    parts.push_back(s.substr(start));
+    while (!parts.empty() && parts.back().empty()) {
+        parts.pop_back();
+    }
+    return parts;
+}
+```
+
+Then removeAll: remove all elements that are in stopWordList:
+
+```cpp
+std::vector<std::string> words;
+for (auto& w : parts) {
+    if (std::find(stopWordList.begin(), stopWordList.end(), w) == stopWordList.end()) {
+        words.push_back(w);
+    }
+}
+```
+
+Order preserved (removeAll preserves order of remaining elements).
+
+Then `process`:
+
+```cpp
+std::vector<std::vector<std::string>> process(const std::vector<std::string>& stringList) {
+    auto stopWordList = constructStopWordList();
+    return removeStopWords(stringList, stopWordList);
+}
+```
+
+Signatures: Java uses `List<String>` (mutable, passed by reference semantics). C++: use `const std::vector<std::string>&` for inputs. That's fine behaviorally since Java doesn't mutate inputs. Return by value.
+
+The trap scan: Java split trailing-empty semantics — handled. Also `removeAll` uses equals — handled with exact match.
+
+Output only the translated cpp code in a code block.
+</think>
+
+=== RAW ANSWER ===
+```cpp
+#include <string>
+#include <vector>
+#include <algorithm>
+
+class NLPDataProcessor {
+public:
+    std::vector<std::string> constructStopWordList() {
+        return {"a", "an", "the"};
+    }
+
+    // Equivalent to Java's String.split(" ") with limit 0:
+    // splits on every ' ', then drops trailing empty strings.
+    static std::vector<std::string> splitOnSpace(const std::string& s) {
+        if (s.find(' ') == std::string::npos) {
+            // No delimiter found: Java returns [this] (even if s is empty -> [""]).
+            return {s};
+        }
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        while (true) {
+            std::size_t end = s.find(' ', start);
+            if (end == std::string::npos) break;
+            parts.push_back(s.substr(start, end - start));
+            start = end + 1;
+        }
+        parts.push_back(s.substr(start));
+        // Remove trailing empty strings (Java split semantics).
+        while (!parts.empty() && parts.back().empty()) {
+            parts.pop_back();
+        }
+        return parts;
+    }
+
+    std::vector<std::vector<std::string>> removeStopWords(
+            const std::vector<std::string>& stringList,
+            const std::vector<std::string>& stopWordList) {
+        std::vector<std::vector<std::string>> result;
+        for (const std::string& str : stringList) {
+            std::vector<std::string> words;
+            for (const std::string& word : splitOnSpace(str)) {
+                // removeAll(stopWordList): drop words equal to any stop word, keep order.
+                if (std::find(stopWordList.begin(), stopWordList.end(), word) == stopWordList.end()) {
+                    words.push_back(word);
+                }
+            }
+            result.push_back(words);
+        }
+        return result;
+    }
+
+    std::vector<std::vector<std::string>> process(const std::vector<std::string>& stringList) {
+        std::vector<std::string> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+};
+```
+
+=== TRANSLATED CODE (cpp) ===
+#include <string>
+#include <vector>
+#include <algorithm>
+
+class NLPDataProcessor {
+public:
+    std::vector<std::string> constructStopWordList() {
+        return {"a", "an", "the"};
+    }
+
+    // Equivalent to Java's String.split(" ") with limit 0:
+    // splits on every ' ', then drops trailing empty strings.
+    static std::vector<std::string> splitOnSpace(const std::string& s) {
+        if (s.find(' ') == std::string::npos) {
+            // No delimiter found: Java returns [this] (even if s is empty -> [""]).
+            return {s};
+        }
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        while (true) {
+            std::size_t end = s.find(' ', start);
+            if (end == std::string::npos) break;
+            parts.push_back(s.substr(start, end - start));
+            start = end + 1;
+        }
+        parts.push_back(s.substr(start));
+        // Remove trailing empty strings (Java split semantics).
+        while (!parts.empty() && parts.back().empty()) {
+            parts.pop_back();
+        }
+        return parts;
+    }
+
+    std::vector<std::vector<std::string>> removeStopWords(
+            const std::vector<std::string>& stringList,
+            const std::vector<std::string>& stopWordList) {
+        std::vector<std::vector<std::string>> result;
+        for (const std::string& str : stringList) {
+            std::vector<std::string> words;
+            for (const std::string& word : splitOnSpace(str)) {
+                // removeAll(stopWordList): drop words equal to any stop word, keep order.
+                if (std::find(stopWordList.begin(), stopWordList.end(), word) == stopWordList.end()) {
+                    words.push_back(word);
+                }
+            }
+            result.push_back(words);
+        }
+        return result;
+    }
+
+    std::vector<std::vector<std::string>> process(const std::vector<std::string>& stringList) {
+        std::vector<std::string> stopWordList = constructStopWordList();
+        return removeStopWords(stringList, stopWordList);
+    }
+};
