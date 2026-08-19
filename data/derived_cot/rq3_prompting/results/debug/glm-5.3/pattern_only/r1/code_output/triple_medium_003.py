@@ -1,0 +1,30 @@
+from typing import List
+
+
+class Solution:
+    def numMovesStonesII(self, stones: List[int]) -> List[int]:
+        stones.sort()
+        stone_length = len(stones)
+        move_penultimate = stones[-2] - stones[0] - stone_length + 2
+        move_final = stones[-1] - stones[1] - stone_length + 2
+        most_moves = max(move_penultimate, move_final)
+
+        # Special case: n-1 stones already consecutive (the remaining stone
+        # cannot join them in a single legal move) -> needs 2 moves (or fewer
+        # if the total span is tiny).
+        if move_penultimate == 0 or move_final == 0:
+            min_legal_moves = min(2, most_moves)
+            return [min_legal_moves, most_moves]
+
+        max_legal_moves = 0
+        starting_index = 0
+        for index, stone in enumerate(stones):
+            while stones[starting_index] <= stone - stone_length:
+                starting_index += 1
+            max_legal_moves = max(max_legal_moves, index - starting_index + 1)
+
+        return [stone_length - max_legal_moves, most_moves]
+
+
+solution = Solution()
+print(solution.numMovesStonesII([7, 4, 9]))

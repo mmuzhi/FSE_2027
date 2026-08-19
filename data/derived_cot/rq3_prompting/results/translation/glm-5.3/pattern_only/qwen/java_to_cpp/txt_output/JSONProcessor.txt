@@ -1,0 +1,473 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+import com.google.gson.Gson;
+
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+
+public class JSONProcessor {
+
+    public Map<String, Object> readJson(String filePath) {
+        if (!Files.exists(Paths.get(filePath))) {
+            return null;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            return new Gson().fromJson(reader, Map.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public boolean writeJson(Map<String, Object> data, String filePath) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            new Gson().toJson(data, writer);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public boolean processJson(String filePath, String removeKey) {
+        Map<String, Object> data = readJson(filePath);
+        if (data == null) {
+            return false;
+        }
+        if (data.containsKey(removeKey)) {
+            data.remove(removeKey);
+            return writeJson(data, filePath);
+        } else {
+            return false;
+        }
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to cpp.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic cpp only when it does not change behavior.
+
+```java
+package org.example;
+
+import com.google.gson.Gson;
+
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+
+public class JSONProcessor {
+
+    public Map<String, Object> readJson(String filePath) {
+        if (!Files.exists(Paths.get(filePath))) {
+            return null;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            return new Gson().fromJson(reader, Map.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public boolean writeJson(Map<String, Object> data, String filePath) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            new Gson().toJson(data, writer);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public boolean processJson(String filePath, String removeKey) {
+        Map<String, Object> data = readJson(filePath);
+        if (data == null) {
+            return false;
+        }
+        if (data.containsKey(removeKey)) {
+            data.remove(removeKey);
+            return writeJson(data, filePath);
+        } else {
+            return false;
+        }
+    }
+}
+```
+
+Use a short stable mapping path that preserves behavior.
+
+Keep the reasoning compact and single-pass:
+- Identify only the pieces that must remain equivalent: signatures, I/O contract, stateful behavior, control flow, and key API semantics.
+- Turn that mapping into target-language structure promptly.
+- Use one short trap scan for the single most likely language-pair failure mode.
+- If a mismatch appears, patch only the affected local section and recheck once.
+- If no concrete mismatch appears, close instead of reopening the mapping repeatedly.
+
+Output only the translated cpp code in a code block.
+
+=== REASONING ===
+<think>
+The Java code uses Gson to read/write JSON as Map<String, Object>. In C++, there's no standard JSON library, but the common idiomatic choice is nlohmann/json. Let me map:
+
+- `readJson(String filePath)` returns `Map<String, Object>` or null → C++: `std::optional<nlohmann::json>` or return a json object with a bool flag. To preserve null semantics, use `std::optional<nlohmann::json>`. But keys: Map<String, Object> — nlohmann::json object maps string->json, which behaves similarly.
+- File existence check: `std::filesystem::exists(filePath)`.
+- Reading: `std::ifstream` + `nlohmann::json::parse` with try/catch → return std::nullopt on exception.
+- writeJson: serialize `data.dump()` and write; return true/false. Note Gson's toJson for a Map produces compact JSON `{"key":value}` — nlohmann dump() default is compact without spaces; Gson default also compact. Key ordering: Gson uses LinkedHashMap order (insertion order from parse). nlohmann::json by default uses std::map (sorted keys). This could change output ordering. To preserve insertion order, could use `nlohmann::ordered_json`. Gson's fromJson to Map.class actually creates LinkedTreeMap which preserves insertion order. So using `nlohmann::ordered_json` better preserves behavior. I'll use `nlohmann::ordered_json` with a type alias.
+
+- processJson: check contains, erase, write.
+
+Behavior: containsKey then remove → in C++: `if (data.contains(removeKey)) { data.erase(removeKey); return writeJson(...); } else return false;`
+
+Signature mapping:
+- `Map<String, Object>` → `ordered_json` (which is a map-like). Alternatively define `using JsonObject = nlohmann::ordered_json;`
+
+Return type of readJson: `std::optional<JsonObject>`.
+
+Trap scan: numeric types — Gson parses numbers into Double (Object = Double for numbers). nlohmann parses ints as int64, doubles as double. Serialization: Gson writes 1.0 as "1.0"? Actually Gson serializes Double 1.0 as "1.0". nlohmann serializes double 1.0 as "1.0" too. Integers: Gson parses integer JSON numbers as Double (since Map<String,Object> → Object; Gson uses Double for numbers when target is Object). So Gson would read `5` as Double 5.0 and write as "5.0"? Actually Gson's default: numbers in Object context become Double, and toJson of Double 5.0 → "5.0". Hmm, that means round-trip via Gson changes integer 5 to 5.0. To replicate exactly in C++ we'd need to parse all numbers as doubles. That's an extreme fidelity point; typical translation would use nlohmann as-is. The instructions say keep behavior identical but "Use idiomatic cpp only when it does not change behavior." The Gson double behavior is a subtle edge. Replicating it: parse with `json::parse` then convert numbers to double? That could be done with a custom serializer callback: `parse(..., [](int depth, parse_event_t event, ordered_json& parsed)`... Simpler: after parsing, walk and convert number_integer/number_unsigned to number_float. But dumping double 5.0 in nlohmann gives "5.0" — yes, nlohmann dump of 5.0 double gives "5.0". Gson Double 5.0 serialization gives "5.0" too. So a recursive conversion of integers to double would mimic Gson. But is that necessary? It changes behavior for edge cases (integer round-trip). The instructions ask to preserve behavior including edge cases. I could add a small recursive function `toGsonStyle` converting integers to double. However Gson also represents large numbers... Double has 53-bit precision. Converting int64 to double mimics that.
+
+Also, if the JSON top-level is not an object (e.g., array or string), Gson's fromJson(reader, Map.class) — with a non-object JSON like `[1,2]`, Gson would... fromJson to Map with array input: Gson would attempt and likely throw (returns null? Actually it throws JsonSyntaxException? For primitive it throws). For an array, Gson might return a Map? No — it would raise an exception: "Expected BEGIN_OBJECT but was BEGIN_ARRAY". Caught → null. In C++, nlohmann parse succeeds giving an array. To match, check `parsed.is_object()` else return nullopt. Similarly writeJson with non-object? In Java, data is always a Map, so C++ typed as object json; fine.
+
+Empty file: Gson fromJson on empty content returns null (fromJson returns null for empty string? Actually Gson throws JsonSyntaxException "Expected BEGIN_OBJECT but was EOF"? For empty input, Gson returns null). In C++, nlohmann parse of empty throws parse_error → caught → nullopt. Close enough: both return null. Gson for empty reader: `fromJson` on empty string returns null (documented). Either way returns null/false. OK.
+
+The type for readJson return: std::optional<ordered_json>. But to keep Map-like semantics, alias `using JsonObject = nlohmann::ordered_json;`.
+
+Given "short stable mapping path", I'll implement:
+
+```cpp
+#include <cstdio>? no.
+```
+
+File writing: Java FileWriter truncates. ofstream default truncates. Good. IOException on failure → false.
+
+Should I include the integer→double normalization? It adds complexity. The prompt says keep behavior identical including edge cases. I'll add a small recursive helper to convert numbers to double to mirror Gson's Object number semantics. Keep it compact.
+
+Actually, also booleans/null/strings map fine. Nested arrays/maps: recursion handles.
+
+One more: Gson skips? Gson default doesn't allow NaN... fine.
+
+writeJson: Gson default serialization: compact, no spaces, escapes some chars (e.g., '/', it escapes? Gson escapes HTML chars like <, >, &, =, ' by default with HtmlSafeSerializer... Actually default Gson.toJson escapes `<`, `>`, `&`, `=`, `'` as unicode \u003c etc.). Replicating that exactly is overkill. The instruction says "Use idiomatic cpp only when it does not change behavior" — but a full Gson emulation is beyond reasonable; the standard translation uses nlohmann::json dump. I'll do dump() with default. I'll skip the HTML escaping (too deep). But the integer→double is a notable round-trip semantic. Hmm. Adding it is cheap:
+
+```cpp
+static void gsonify(nlohmann::ordered_json& j) {
+    switch (j.type()) {
+        case json::value_t::number_integer: {
+            j = static_cast<double>(j.get<int64_t>());
+            break; }
+        case number_unsigned: j = static_cast<double>(j.get<uint64_t>()); break;
+        case object: for (auto& [k,v] : j.items()) gsonify(v); break;
+        case array: for (auto& v : j) gsonify(v); break;
+        default: break;
+    }
+}
+```
+
+nlohmann assigning a double that is integral — it stores as number_float, dump gives e.g. "5.0". Good.
+
+But then containsKey/remove operate on object; fine.
+
+Also note: Gson parse of duplicate keys keeps last — nlohmann keeps last too for ordered_json? ordered_json uses std::map-like? ordered_json uses a vector; duplicate keys: parse replaces? I believe nlohmann handles duplicates by keeping the last (set_parent... actually documented behavior: last value wins? The library docs say for duplicate keys, the behavior... nlohmann keeps the first? Hmm. In nlohmann, when parsing duplicate keys, later overwrites earlier? The implementation `internal::handle_duplicate_keys`... I recall newer versions overwrite (last wins) matching RFC suggestions. Not critical.
+
+Code:
+
+```cpp
+// JSONProcessor.hpp / .cpp
+#include <optional>
+#include <fstream>
+#include <filesystem>
+#include <stdexcept>
+#include "nlohmann/json.hpp"
+
+namespace org::example {
+
+namespace fs = std::filesystem;
+using json = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    std::optional<json> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!fs::exists(fs::path(filePath), ec)) return std::nullopt;
+        try {
+            std::ifstream reader(filePath);
+            json parsed = json::parse(reader);
+            if (!parsed.is_object()) return std::nullopt; // Gson: Expected BEGIN_OBJECT
+            gsonifyNumbers(parsed);
+            return parsed;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    bool writeJson(const json& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath, std::ios::out | std::ios::trunc);
+            if (!writer) throw std::runtime_error("cannot open file");
+            writer << data.dump();
+            if (!writer) throw std::runtime_error("write failed");
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<json> data = readJson(filePath);
+        if (!data) return false;
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+
+private:
+    static void gsonifyNumbers(json& node) {
+        switch (node.type()) {
+            case json::value_t::number_integer:
+                node = static_cast<double>(node.get<std::int64_t>());
+                break;
+            case json::value_t::number_unsigned:
+                node = static_cast<double>(node.get<std::uint64_t>());
+                break;
+            case json::value_t::object:
+                for (auto& item : node.items()) gsonifyNumbers(item.value());
+                break;
+            case json::value_t::array:
+                for (auto& element : node) gsonifyNumbers(element);
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+} // namespace org::example
+```
+
+Wait: catch(...) also catch non-std exceptions — use catch (...) to mirror Java catch(Exception). Java catches Exception; C++ catch(...) is closest. Use catch (...) { return std::nullopt; }.
+
+Also `Files.exists` throws? No. fs::exists with error_code avoids throwing.
+
+writeJson in Java returns false if serialization throws. Gson toJson of Map rarely throws. dump() can throw only for NaN? fine, caught.
+
+Also note FileWriter uses default charset — irrelevant.
+
+Type for writeJson parameter: Java `Map<String, Object> data` — C++ `const json&` (object). Keep as `json` alias named maybe `JsonObject`. Let me define `using JsonObject = nlohmann::ordered_json;` and use it, closer to Map<String,Object>.
+
+Output only code block. Single file. Add brief comment header maybe. Keep it minimal.
+</think>
+
+=== RAW ANSWER ===
+```cpp
+// JSONProcessor.cpp — C++ translation of org.example.JSONProcessor
+// Uses nlohmann/json (ordered_json preserves Gson's insertion-order map semantics).
+// readJson returns std::nullopt to mirror Java's null return on missing file / parse error.
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+
+#include "nlohmann/json.hpp"
+
+namespace org::example {
+
+namespace fs = std::filesystem;
+using JsonObject = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: Map<String, Object> readJson(String) -> null on missing file or any exception
+    std::optional<JsonObject> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!fs::exists(fs::path(filePath), ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            JsonObject parsed = JsonObject::parse(reader);
+            // Gson's fromJson(reader, Map.class) fails on non-object JSON ("Expected BEGIN_OBJECT")
+            if (!parsed.is_object()) {
+                return std::nullopt;
+            }
+            toGsonNumberSemantics(parsed); // Gson maps all JSON numbers to Double in Object context
+            return parsed;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    // Java: boolean writeJson(Map<String, Object>, String) -> false on any exception
+    bool writeJson(const JsonObject& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath, std::ios::out | std::ios::trunc); // FileWriter truncates
+            if (!writer) {
+                throw std::runtime_error("cannot open file for writing");
+            }
+            const std::string out = data.dump(); // compact form, like Gson's default
+            writer << out;
+            writer.flush();
+            if (!writer) {
+                throw std::runtime_error("write failed");
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Java: boolean processJson(String, String)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonObject> data = readJson(filePath);
+        if (!data) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        } else {
+            return false;
+        }
+    }
+
+private:
+    // Gson deserializes every JSON number into Double when the target is Object,
+    // so integers round-trip as "5.0". Convert integer nodes to doubles to match.
+    static void toGsonNumberSemantics(JsonObject& node) {
+        switch (node.type()) {
+            case JsonObject::value_t::number_integer:
+                node = static_cast<double>(node.get<std::int64_t>());
+                break;
+            case JsonObject::value_t::number_unsigned:
+                node = static_cast<double>(node.get<std::uint64_t>());
+                break;
+            case JsonObject::value_t::object:
+                for (auto& item : node.items()) {
+                    toGsonNumberSemantics(item.value());
+                }
+                break;
+            case JsonObject::value_t::array:
+                for (auto& element : node) {
+                    toGsonNumberSemantics(element);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+} // namespace org::example
+```
+
+=== TRANSLATED CODE (cpp) ===
+// JSONProcessor.cpp — C++ translation of org.example.JSONProcessor
+// Uses nlohmann/json (ordered_json preserves Gson's insertion-order map semantics).
+// readJson returns std::nullopt to mirror Java's null return on missing file / parse error.
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+
+#include "nlohmann/json.hpp"
+
+namespace org::example {
+
+namespace fs = std::filesystem;
+using JsonObject = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: Map<String, Object> readJson(String) -> null on missing file or any exception
+    std::optional<JsonObject> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!fs::exists(fs::path(filePath), ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            JsonObject parsed = JsonObject::parse(reader);
+            // Gson's fromJson(reader, Map.class) fails on non-object JSON ("Expected BEGIN_OBJECT")
+            if (!parsed.is_object()) {
+                return std::nullopt;
+            }
+            toGsonNumberSemantics(parsed); // Gson maps all JSON numbers to Double in Object context
+            return parsed;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    // Java: boolean writeJson(Map<String, Object>, String) -> false on any exception
+    bool writeJson(const JsonObject& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath, std::ios::out | std::ios::trunc); // FileWriter truncates
+            if (!writer) {
+                throw std::runtime_error("cannot open file for writing");
+            }
+            const std::string out = data.dump(); // compact form, like Gson's default
+            writer << out;
+            writer.flush();
+            if (!writer) {
+                throw std::runtime_error("write failed");
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Java: boolean processJson(String, String)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonObject> data = readJson(filePath);
+        if (!data) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        } else {
+            return false;
+        }
+    }
+
+private:
+    // Gson deserializes every JSON number into Double when the target is Object,
+    // so integers round-trip as "5.0". Convert integer nodes to doubles to match.
+    static void toGsonNumberSemantics(JsonObject& node) {
+        switch (node.type()) {
+            case JsonObject::value_t::number_integer:
+                node = static_cast<double>(node.get<std::int64_t>());
+                break;
+            case JsonObject::value_t::number_unsigned:
+                node = static_cast<double>(node.get<std::uint64_t>());
+                break;
+            case JsonObject::value_t::object:
+                for (auto& item : node.items()) {
+                    toGsonNumberSemantics(item.value());
+                }
+                break;
+            case JsonObject::value_t::array:
+                for (auto& element : node) {
+                    toGsonNumberSemantics(element);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+} // namespace org::example
