@@ -1,0 +1,772 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+public class NumberConverter {
+
+    public static String decimalToBinary(int decimalNum) {
+        return Integer.toBinaryString(decimalNum);
+    }
+
+    public static int binaryToDecimal(String binaryNum) {
+        return Integer.parseInt(binaryNum, 2);
+    }
+
+    public static String decimalToOctal(int decimalNum) {
+        return Integer.toOctalString(decimalNum);
+    }
+
+    public static int octalToDecimal(String octalNum) {
+        return Integer.parseInt(octalNum, 8);
+    }
+
+    public static String decimalToHex(int decimalNum) {
+        return Integer.toHexString(decimalNum);
+    }
+
+    public static int hexToDecimal(String hexNum) {
+        return Integer.parseInt(hexNum, 16);
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to cpp.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic cpp only when it does not change behavior.
+
+```java
+package org.example;
+
+public class NumberConverter {
+
+    public static String decimalToBinary(int decimalNum) {
+        return Integer.toBinaryString(decimalNum);
+    }
+
+    public static int binaryToDecimal(String binaryNum) {
+        return Integer.parseInt(binaryNum, 2);
+    }
+
+    public static String decimalToOctal(int decimalNum) {
+        return Integer.toOctalString(decimalNum);
+    }
+
+    public static int octalToDecimal(String octalNum) {
+        return Integer.parseInt(octalNum, 8);
+    }
+
+    public static String decimalToHex(int decimalNum) {
+        return Integer.toHexString(decimalNum);
+    }
+
+    public static int hexToDecimal(String hexNum) {
+        return Integer.parseInt(hexNum, 16);
+    }
+}
+```
+
+Try to avoid:
+- bouncing between partial code and repeated redesign;
+- reopening the mapping for every local implementation detail;
+- expanding one local translation doubt into a full restructuring cycle.
+
+Output only the translated cpp code in a code block.
+
+=== REASONING ===
+<think>
+Let me analyze the Java code:
+
+1. `decimalToBinary(int)` - `Integer.toBinaryString` - converts to unsigned binary representation (handles negative numbers by treating as unsigned 32-bit).
+2. `binaryToDecimal(String)` - `Integer.parseInt(s, 2)` - parses signed 32-bit int, throws NumberFormatException on invalid input or overflow.
+3. `decimalToOctal(int)` - `Integer.toOctalString` - unsigned octal.
+4. `octalToDecimal(String)` - `Integer.parseInt(s, 8)`.
+5. `decimalToHex(int)` - `Integer.toHexString` - unsigned lowercase hex.
+6. `hexToDecimal(String)` - `Integer.parseInt(s, 16)`.
+
+Key behaviors to replicate:
+- `Integer.toBinaryString/toOctalString/toHexString` treat the value as **unsigned**. E.g., `toHexString(-1)` returns "ffffffff". In C++, `std::format("{:x}", (uint32_t)v)` or manual conversion with `unsigned int` works. But we need C++ compatibility. Using `std::hex` with `std::stringstream` and casting to `unsigned int` gives lowercase hex without leading zeros — matches Java's `toHexString`. Similarly for octal with `std::oct`. For binary, need manual conversion since `std::bin` doesn't exist (C++ has `std::bin`? No — iostream manipulators only have dec/hex/oct). So implement binary manually for unsigned 32-bit.
+
+Edge case: `toBinaryString(0)` returns "0". Manual loop: if value == 0 return "0".
+
+- `Integer.parseInt(String, radix)` semantics:
+  - Accepts optional leading '+' or '-' sign (sign only for base conversions; yes parseInt with radix accepts sign).
+  - Throws NumberFormatException if string is null, empty, invalid characters, or value out of int range.
+  - Parses as signed 32-bit: e.g., "ffffffff" with radix 16 throws (out of range), while "FFFFFFFF" works and gives -1. "2147483648" binary? binary digits only 0/1.
+  - Digits: 0-9, a-z, A-Z per Character.digit. For radix 2: only '0','1'. Radix 8: 0-7. Radix 16: 0-9, a-f, A-F.
+
+In C++, we can implement a manual parser that mimics this:
+- Check empty string → throw invalid_argument (or a custom exception). Java throws `NumberFormatException`. In C++, we can throw `std::invalid_argument` or `std::out_of_range` from `<stdexcept>` to mirror semantics. Behavior "identical including exceptions" — best to throw `std::invalid_argument` for malformed input and `std::out_of_range` for overflow, similar to `std::stoi`. Actually a good approach: use `std::stoul`? Hmm, but `std::stoul` accepts "+"/"-" and wraps? `stoul` on negative converts to unsigned with wraparound. That differs. Better to write custom parser.
+
+Let me write a helper:
+
+```cpp
+static int parseIntRadix(const std::string& s, int radix) {
+    if (s.empty()) throw std::invalid_argument(...);
+    std::size_t i = 0;
+    bool negative = false;
+    if (s[0] == '+' || s[0] == '-') { negative = (s[0]=='-'); i = 1; }
+    if (i == s.size()) throw std::invalid_argument(...);
+    // parse digits into unsigned long long, detect overflow beyond 2147483647 (or 2147483648 for negative)
+    unsigned long long limit = negative ? 2147483648ULL : 2147483647ULL;
+    unsigned long long result = 0;
+    for (; i < s.size(); ++i) {
+        int digit = digitValue(s[i]); // returns -1 if invalid
+        if (digit < 0 || digit >= radix) throw std::invalid_argument(...);
+        result = result * radix + digit;
+        if (result > limit) throw std::out_of_range(...);
+    }
+    if (negative) return static_cast<int>(0ULL - result); // careful
+    return static_cast<int>(result);
+}
+```
+
+Wait: overflow check inside the loop before multiplication: `result > (limit - digit) / radix`? Simpler: since limit max is 2147483648 and radix ≥ 2, we can check after each step: `if (result > limit) throw`. But overflow of unsigned long long could happen if the string is extremely long (e.g., hundreds of digits). result * radix could overflow ULL after ~20 digits. To be safe, check `if (result > (limit - digit) / radix)` before, or check `result > limit / radix` before multiply then compare. Let's do:
+
+```cpp
+for each char:
+    digit
+    if (result > (limit - digit) / radix) throw out_of_range;
+    result = result * radix + digit;
+```
+
+Hmm, `(limit - digit) / radix` — limit is ULL, digit is int. Fine. This exactly checks `result * radix + digit > limit`.
+
+Then final value: if negative, value = -(long long)result; return (int)value — but result ≤ 2147483648, so -result ≥ -2147483648 fits. Cast: `return static_cast<int>(~result + 1ULL);` or `return static_cast<int>(static_cast<unsigned int>(result))`? For negative: result ≤ 2147483648, `-result` as long long is fine: `return static_cast<int>(-static_cast<long long>(result));` That avoids unsigned wrap concerns (which are well-defined anyway).
+
+Actually simpler: keep result as unsigned int range... Let me just use long long for clarity:
+
+```cpp
+long long limit = negative ? 2147483648LL : 2147483647LL;
+long long result = 0;
+...
+if (result > (limit - digit) / radix) throw std::out_of_range(...);
+result = result * radix + digit;
+...
+return negative ? static_cast<int>(-result) : static_cast<int>(result);
+```
+
+digitValue: use `std::isdigit`-like manual:
+
+```cpp
+static int digitValue(char c, int radix) {
+    int d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+    else return -1;
+    return d < radix ? d : -1;
+}
+```
+
+Java's `Character.digit` handles exactly these ranges (plus full-width unicode stuff, but irrelevant).
+
+Note: Java `parseInt` doesn't allow whitespace. Also Java allows leading '+'/'-' only one. Good.
+
+Now for `Integer.toBinaryString(int)`: unsigned representation. Implementation:
+
+```cpp
+static std::string toUnsignedString(unsigned int value, int radix) {
+    if (value == 0) return "0";
+    const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    std::string result;
+    while (value > 0) {
+        result.push_back(digits[value % radix]);
+        value /= radix;
+    }
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+```
+
+For hex, Java uses lowercase — matches. Octal matches. Binary matches.
+
+Alternatively use `std::stringstream` with `std::hex`/`std::oct` and unsigned cast for hex/octal, but a single helper is cleaner and consistent. I'll use the helper for all three.
+
+Now the class: Java static methods in a class `NumberConverter` in package `org.example`. C++ translation: a class with static member functions, or free functions in a namespace. To mirror structure, a class `NumberConverter` with static methods. The Java code has no main; it's a utility class. Keep it header-less single translation unit? The prompt says "Output only the translated cpp code in a code block." I'll produce a `.cpp`-style file. Should I include a main? No — the Java has no main; keep identical. But maybe include the class with declarations+definitions inline.
+
+Also note: package org.example → could be namespace org::example but that's optional. I'll keep it simple: `class NumberConverter` with public static methods. Maybe wrap in namespace `org::example` to mirror package? Idiomatic C++ might skip, but mirroring structure is safe and doesn't change behavior. I'll include it lightly... Actually keeping it minimal is fine. Let me include `namespace org { namespace example { ... } }` to mirror the package? Hmm, could complicate usage. The instruction: "Use idiomatic cpp only when it does not change behavior." A class with static methods mirrors Java's structure well. I'll present a single header-like/class definition in one file.
+
+Exceptions: Java `NumberFormatException extends IllegalArgumentException`. C++ closest: `std::invalid_argument` for malformed, `std::out_of_range` for overflow — matches `std::stoi` conventions. I'll throw with message strings similar to Java: e.g., `For input string: \"" + s + "\"`. Java's messages: "For input string: \"abc\"" for invalid; for overflow with radix: Java actually... `Integer.parseInt("ffffffff", 16)` throws NumberFormatException with message... For out of range, the message is also "For input string: \"ffffffff\""? Let me recall: In Java, `Integer.parseInt` overflow throws NumberFormatException with message `For input string: "..."`. Actually I believe the message for values out of range is also "For input string: ...". Hmm, in OpenJDK's Integer.parseInt (the newer implementation), out-of-range produces `throw new NumberFormatException("For input string: \"" + s + "\"")`? Let me recall the code:
+
+Old implementation:
+```java
+public static int parseInt(String s, int radix) throws NumberFormatException {
+    ...
+    int result = 0;
+    ...
+    while (i < len) {
+        digit = Character.digit(s.charAt(i++), radix);
+        if (digit < 0) throw new NumberFormatException(...);
+        result *= radix;
+        if (result < limit + digit)? ...
+    }
+    ...
+}
+```
+
+The exception messages: for null: "null" (from the newer version "Cannot parse null..."?). Honestly, exact message text isn't crucial for behavior parity in a translation; the exception *type* is more relevant. Java NumberFormatException message for parseInt is `For input string: "xxx"`. I'll include messages like that. Since NumberFormatException doesn't exist in C++, using std::invalid_argument / std::out_of_range is the standard mapping. I could define a custom `NumberFormatException : public std::invalid_argument` — that might be over-engineering but actually captures both cases if derived from invalid_argument. Hmm. Many translation guides map NumberFormatException to std::invalid_argument. I'll define a custom exception class? The guidance says avoid restructuring. I'll use std::invalid_argument for parse errors and std::out_of_range for range errors — mirroring stoi semantics. That's the common mapping.
+
+Actually, to keep both catchable as one type and closer to Java, I could make a `NumberFormatException` deriving from `std::invalid_argument`, and throw it for both invalid format and out-of-range (since Java throws NumberFormatException in both cases). That's arguably more faithful: in Java, both cases throw the same exception type. Let me do that:
+
+```cpp
+class NumberFormatException : public std::invalid_argument {
+public:
+    explicit NumberFormatException(const std::string& message)
+        : std::invalid_argument(message) {}
+};
+```
+
+And throw it for both. Message: `For input string: "` + s + `"`.
+
+That's a nice faithful mapping. It keeps behavior identical (exception thrown on invalid input) and preserves the type distinction.
+
+Now write the full code:
+
+```cpp
+#include <algorithm>
+#include <stdexcept>
+#include <string>
+
+namespace org {
+namespace example {
+
+class NumberFormatException : public std::invalid_argument {
+public:
+    explicit NumberFormatException(const std::string& message)
+        : std::invalid_argument(message) {}
+};
+
+class NumberConverter {
+public:
+    static std::string decimalToBinary(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 2);
+    }
+
+    static int binaryToDecimal(const std::string& binaryNum) {
+        return parseInt(binaryNum, 2);
+    }
+
+    static std::string decimalToOctal(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 8);
+    }
+
+    static int octalToDecimal(const std::string& octalNum) {
+        return parseInt(octalNum, 8);
+    }
+
+    static std::string decimalToHex(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 16);
+    }
+
+    static int hexToDecimal(const std::string& hexNum) {
+        return parseInt(hexNum, 16);
+    }
+
+private:
+    static const char DIGITS[];
+
+    // Equivalent of Integer.toBinaryString / toOctalString / toHexString:
+    // treats the value as an unsigned 32-bit integer.
+    static std::string toUnsignedString(unsigned int value, int radix) {
+        if (value == 0) {
+            return "0";
+        }
+        std::string result;
+        while (value > 0) {
+            result.push_back(DIGITS[value % radix]);
+            value /= static_cast<unsigned int>(radix);
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+
+    // Equivalent of Character.digit(char, int).
+    static int digitValue(char c, int radix) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            digit = c - 'A' + 10;
+        } else {
+            return -1;
+        }
+        return digit < radix ? digit : -1;
+    }
+
+    // Equivalent of Integer.parseInt(String, int):
+    // optional sign, digits in the given radix, signed 32-bit range check.
+    static int parseInt(const std::string& s, int radix) {
+        if (s.empty()) {
+            throw NumberFormatException("For input string: \"" + s + "\"");
+        }
+        std::size_t i = 0;
+        bool negative = false;
+        if (s[0] == '+' || s[0] == '-') {
+            negative = (s[0] == '-');
+            i = 1;
+        }
+        if (i >= s.size()) {
+            throw NumberFormatException("For input string: \"" + s + "\"");
+        }
+        const long long limit = negative ? 2147483648LL : 2147483647LL;
+        long long result = 0;
+        for (; i < s.size(); ++i) {
+            const int digit = digitValue(s[i], radix);
+            if (digit < 0) {
+                throw NumberFormatException("For input string: \"" + s + "\"");
+            }
+            if (result > (limit - digit) / radix) {
+                throw NumberFormatException("For input string: \"" + s + "\"");
+            }
+            result = result * radix + digit;
+        }
+        return negative ? static_cast<int>(-result)
+                        : static_cast<int>(result);
+    }
+};
+
+const char NumberConverter::DIGITS[] =
+    "0123456789abcdefghijklmnopqrstuvwxyz";
+
+} // namespace example
+} // namespace org
+```
+
+Wait — defining static const char DIGITS[] out of class in the same TU is fine. Or just use a local `static const char digits[]` inside the function, or a `constexpr` string literal within function. Simpler: inside `toUnsignedString`, `static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";` or just define it inline. C++17 allows `static constexpr char digits[] = "...";` inside the function. Let me put it as a local static constexpr in the function to avoid out-of-class definition.
+
+Also, note Java's parseInt with radix: does it allow a sign? Yes — `Integer.parseInt("+10", 2)` returns 2, `"-10"` returns -2. Good.
+
+Check negative result cast: `static_cast<int>(-result)` where result ≤ 2147483648 → -result ≥ -2147483648, fits in int. Good.
+
+Check `hexToDecimal("ffffffff")`: digits parse to 4294967295, limit 2147483647, result exceeds → throws, matching Java. `hexToDecimal("7fffffff")` = 2147483647 ✓. `hexToDecimal("80000000")` → throws (Java also throws: 2147483648 > Integer.MAX_VALUE) ✓. `hexToDecimal("-80000000")` → -2147483648 ✓ (limit 2147483648, result = 2147483648 ≤ limit, ok).
+
+`decimalToHex(-1)` → unsigned 4294967295 → "ffffffff" ✓.
+`decimalToBinary(0)` → "0" ✓. `decimalToBinary(-1)` → 32 ones ✓.
+`decimalToOctal(8)` → "10" ✓.
+
+Java `toHexString(0)` → "0" ✓.
+
+Edge: `binaryToDecimal("")` throws ✓ (Java throws NumberFormatException). `binaryToDecimal("+")` throws ✓. `binaryToDecimal(" 10")` throws ✓ (space invalid).
+
+One nuance: Java `Integer.parseInt` treats each char via `Character.digit`, which for ASCII is exactly 0-9, a-z, A-Z mapping. ✓.
+
+Also note Java's newer parseInt implementations reject strings longer than... actually the Latin-1 fast path: for strings longer than 7 chars with Latin1, it goes to the general path; no length-based rejection. There's `parseInt(CharSequence, int, int, int)` which throws for out-of-range based on length... For the String version, overflow detection is by value. So our value-based check matches.
+
+Now also consider: should methods take `const std::string&`? Java `String` → `const std::string&` is idiomatic. ✓.
+
+Namespace: `org::example` mirrors the Java package. Some might drop it, but including keeps structure. I'll keep it.
+
+Header guard / pragma? Since it's a .cpp file per the request ("translated cpp code"), maybe no include guard needed. But including one doesn't hurt; could be viewed as a header. The user asked to translate to cpp — I'll output a single translation unit with includes and the code. No main (Java has no main).
+
+Also `#include <cstddef>` for std::size_t? `<string>` pulls it in typically; add `<cstddef>` to be safe? `std::size_t` is in `<cstddef>`. Many headers provide it transitively. I'll add it for correctness. Or just use `size_t` via `<string>`... To be safe: include `<cstddef>`.
+
+Also `std::reverse` from `<algorithm>` ✓.
+
+Let me also double check overflow condition: `result > (limit - digit) / radix`. limit ≥ digit always (digit ≤ 35, limit ≥ 2147483647). Integer division. If result*radix + digit > limit ⇔ result > (limit - digit)/radix? Let's verify: result * radix + digit > limit ⇔ result * radix > limit - digit ⇔ result > (limit - digit)/radix when radix > 0 and limit - digit ≥ 0 (integer floor division: result*radix > limit-digit ⇔ result > floor((limit-digit)/radix)). Yes: result * radix > X ⇔ result > floor(X / radix). ✓. So condition to throw is exactly that. Good.
+
+Also both radixes are constants here (2, 8, 16), no zero-radix concern.
+
+Alternatively could just use `unsigned long long` and check `result > limit` after multiply, guarding ULL overflow by checking result before multiply: `if (result > (limit / radix)) throw` then multiply... The current approach is exact; keep it.
+
+Message format: Java: `throw new NumberFormatException("For input string: \"" + s + "\"");` — matches what I have. For null input Java throws NumberFormatException with message... Actually `Integer.parseInt(null, 2)` throws NumberFormatException("null")? In newer JDKs: `throw new NumberFormatException("Cannot parse null or empty string")`? Hmm, JDK 21's parseInt(String, int): `if (s == null) { throw new NumberFormatException("null"); }`? Let me recall. JDK source (17+):
+
+```java
+public static int parseInt(String s, int radix) throws NumberFormatException {
+    if (s == null) {
+        throw new NumberFormatException("null");
+    }
+    ...
+```
+
+Hmm, actually I recall the newer implementation:
+
+```java
+public static int parseInt(String s, int radix) throws NumberFormatException {
+    if (s == null) {
+        throw new NumberFormatException("Cannot parse null string");
+    }
+```
+
+I'm not 100% sure of exact message; doesn't matter — in C++ there is no null string. Empty string message in Java: older impl: for len==0 or just sign, it throws `NumberFormatException(formatForInputString(s, radix))`? The newer one: "For radix..."? The classic message is `For input string: "..."`. Message text is not essential for behavioral parity of a translation; exception type is. Keep the classic message.
+
+Also Java messages for out-of-range: In older JDK (e.g., 8), the overflow path threw `NumberFormatException(String.format("For input string: \"%s\"", s))`? Actually JDK8's parseInt: `throw numberFormatError(s);` where numberFormatError returns `new NumberFormatException("For input string: \"" + s + "\"")` — yes, both invalid digit and overflow use the same message helper in JDK8+. Good, consistent with mine.
+
+Now, DIGITS constant: put inside function:
+
+```cpp
+static std::string toUnsignedString(unsigned int value, int radix) {
+    static constexpr char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    ...
+}
+```
+
+`constexpr` local static in a static member function is fine.
+
+Cast in `value % radix`: radix is int; `value % radix` — mixing unsigned int and int promotes to unsigned int; radix positive so fine. `value /= radix;` similar. OK without casts, but explicit cast is cleaner. I'll keep `static_cast<unsigned int>(radix)` or just rely on usual conversions — fine either way. Keep it simple: `value % static_cast<unsigned int>(radix)`.
+
+One more consideration: Java method names — keep identical: `decimalToBinary`, `binaryToDecimal`, etc. ✓.
+
+Also class name `NumberConverter`, public static methods ✓.
+
+Should the C++ exception class be nested in NumberConverter or at namespace scope? Java's NumberFormatException is from java.lang. I'll place it in the same namespace, non-nested. Fine.
+
+Final code:
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <stdexcept>
+#include <string>
+
+namespace org {
+namespace example {
+
+// Equivalent of java.lang.NumberFormatException.
+class NumberFormatException : public std::invalid_argument {
+public:
+    explicit NumberFormatException(const std::string& message)
+        : std::invalid_argument(message) {}
+};
+
+class NumberConverter {
+public:
+    static std::string decimalToBinary(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 2);
+    }
+
+    static int binaryToDecimal(const std::string& binaryNum) {
+        return parseInt(binaryNum, 2);
+    }
+
+    static std::string decimalToOctal(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 8);
+    }
+
+    static int octalToDecimal(const std::string& octalNum) {
+        return parseInt(octalNum, 8);
+    }
+
+    static std::string decimalToHex(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 16);
+    }
+
+    static int hexToDecimal(const std::string& hexNum) {
+        return parseInt(hexNum, 16);
+    }
+
+private:
+    // Equivalent of Integer.toBinaryString / toOctalString / toHexString:
+    // the value is treated as an unsigned 32-bit integer.
+    static std::string toUnsignedString(unsigned int value, int radix) {
+        static constexpr char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+        if (value == 0) {
+            return "0";
+        }
+        std::string result;
+        while (value > 0) {
+            result.push_back(digits[value % static_cast<unsigned int>(radix)]);
+            value /= static_cast<unsigned int>(radix);
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+
+    // Equivalent of Character.digit(char, int) for ASCII input.
+    static int digitValue(char c, int radix) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            digit = c - 'A' + 10;
+        } else {
+            return -1;
+        }
+        return digit < radix ? digit : -1;
+    }
+
+    static NumberFormatException forInputString(const std::string& s) {
+        return NumberFormatException("For input string: \"" + s + "\"");
+    }
+
+    // Equivalent of Integer.parseInt(String, int): optional sign character
+    // followed by digits of the given radix; result must fit in a signed
+    // 32-bit int, otherwise a NumberFormatException is thrown.
+    static int parseInt(const std::string& s, int radix) {
+        if (s.empty()) {
+            throw forInputString(s);
+        }
+        std::size_t i = 0;
+        bool negative = false;
+        if (s[0] == '+' || s[0] == '-') {
+            negative = (s[0] == '-');
+            ++i;
+        }
+        if (i == s.size()) {
+            throw forInputString(s);
+        }
+        const long long limit = negative ? 2147483648LL : 2147483647LL;
+        long long result = 0;
+        for (; i < s.size(); ++i) {
+            const int digit = digitValue(s[i], radix);
+            if (digit < 0) {
+                throw forInputString(s);
+            }
+            if (result > (limit - digit) / radix) {
+                throw forInputString(s);
+            }
+            result = result * radix + digit;
+        }
+        return negative ? static_cast<int>(-result) : static_cast<int>(result);
+    }
+};
+
+} // namespace example
+} // namespace org
+```
+
+`throw forInputString(s);` — throwing a temporary returned by value; copy elision/move works since NumberFormatException has implicit move ctor? It derives from std::invalid_argument which is copyable/movable; the derived class gets implicit copy/move. `throw expr;` copies into exception storage. Fine.
+
+Hmm, one subtlety: Java's `Integer.parseInt` with radix 16 accepts uppercase letters A-F as digits 10-15; letters beyond 'f'/'F' are invalid because digit ≥ radix. My digitValue handles: 'z' → 35 ≥ 16 → -1 ✓.
+
+Another subtlety: Java's parseInt rejects strings with whitespace, underscores (Java 7+ underscores only in literals, not parseInt) ✓.
+
+Also Java's parseInt("+0") = 0 ✓, "-0" = 0 ✓.
+
+Behavior for `decimalToBinary(Integer.MIN_VALUE)`: unsigned 2147483648 → 32 ones "10000000000000000000000000000000" ✓ matches Java.
+
+I think the code is complete. The user said output only the translated cpp code in a code block. So no extra commentary. Output the code block only.
+</think>
+
+=== RAW ANSWER ===
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <stdexcept>
+#include <string>
+
+namespace org {
+namespace example {
+
+// Equivalent of java.lang.NumberFormatException.
+class NumberFormatException : public std::invalid_argument {
+public:
+    explicit NumberFormatException(const std::string& message)
+        : std::invalid_argument(message) {}
+};
+
+class NumberConverter {
+public:
+    static std::string decimalToBinary(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 2);
+    }
+
+    static int binaryToDecimal(const std::string& binaryNum) {
+        return parseInt(binaryNum, 2);
+    }
+
+    static std::string decimalToOctal(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 8);
+    }
+
+    static int octalToDecimal(const std::string& octalNum) {
+        return parseInt(octalNum, 8);
+    }
+
+    static std::string decimalToHex(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 16);
+    }
+
+    static int hexToDecimal(const std::string& hexNum) {
+        return parseInt(hexNum, 16);
+    }
+
+private:
+    // Equivalent of Integer.toBinaryString / toOctalString / toHexString:
+    // the value is treated as an unsigned 32-bit integer.
+    static std::string toUnsignedString(unsigned int value, int radix) {
+        static constexpr char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+        if (value == 0) {
+            return "0";
+        }
+        std::string result;
+        while (value > 0) {
+            result.push_back(digits[value % static_cast<unsigned int>(radix)]);
+            value /= static_cast<unsigned int>(radix);
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+
+    // Equivalent of Character.digit(char, int) for ASCII input.
+    static int digitValue(char c, int radix) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            digit = c - 'A' + 10;
+        } else {
+            return -1;
+        }
+        return digit < radix ? digit : -1;
+    }
+
+    static NumberFormatException forInputString(const std::string& s) {
+        return NumberFormatException("For input string: \"" + s + "\"");
+    }
+
+    // Equivalent of Integer.parseInt(String, int): an optional sign
+    // character followed by digits of the given radix; the result must fit
+    // in a signed 32-bit int, otherwise NumberFormatException is thrown.
+    static int parseInt(const std::string& s, int radix) {
+        if (s.empty()) {
+            throw forInputString(s);
+        }
+        std::size_t i = 0;
+        bool negative = false;
+        if (s[0] == '+' || s[0] == '-') {
+            negative = (s[0] == '-');
+            ++i;
+        }
+        if (i == s.size()) {
+            throw forInputString(s);
+        }
+        const long long limit = negative ? 2147483648LL : 2147483647LL;
+        long long result = 0;
+        for (; i < s.size(); ++i) {
+            const int digit = digitValue(s[i], radix);
+            if (digit < 0) {
+                throw forInputString(s);
+            }
+            if (result > (limit - digit) / radix) {
+                throw forInputString(s);
+            }
+            result = result * radix + digit;
+        }
+        return negative ? static_cast<int>(-result) : static_cast<int>(result);
+    }
+};
+
+} // namespace example
+} // namespace org
+```
+
+=== TRANSLATED CODE (cpp) ===
+#include <algorithm>
+#include <cstddef>
+#include <stdexcept>
+#include <string>
+
+namespace org {
+namespace example {
+
+// Equivalent of java.lang.NumberFormatException.
+class NumberFormatException : public std::invalid_argument {
+public:
+    explicit NumberFormatException(const std::string& message)
+        : std::invalid_argument(message) {}
+};
+
+class NumberConverter {
+public:
+    static std::string decimalToBinary(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 2);
+    }
+
+    static int binaryToDecimal(const std::string& binaryNum) {
+        return parseInt(binaryNum, 2);
+    }
+
+    static std::string decimalToOctal(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 8);
+    }
+
+    static int octalToDecimal(const std::string& octalNum) {
+        return parseInt(octalNum, 8);
+    }
+
+    static std::string decimalToHex(int decimalNum) {
+        return toUnsignedString(static_cast<unsigned int>(decimalNum), 16);
+    }
+
+    static int hexToDecimal(const std::string& hexNum) {
+        return parseInt(hexNum, 16);
+    }
+
+private:
+    // Equivalent of Integer.toBinaryString / toOctalString / toHexString:
+    // the value is treated as an unsigned 32-bit integer.
+    static std::string toUnsignedString(unsigned int value, int radix) {
+        static constexpr char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+        if (value == 0) {
+            return "0";
+        }
+        std::string result;
+        while (value > 0) {
+            result.push_back(digits[value % static_cast<unsigned int>(radix)]);
+            value /= static_cast<unsigned int>(radix);
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+
+    // Equivalent of Character.digit(char, int) for ASCII input.
+    static int digitValue(char c, int radix) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            digit = c - 'A' + 10;
+        } else {
+            return -1;
+        }
+        return digit < radix ? digit : -1;
+    }
+
+    static NumberFormatException forInputString(const std::string& s) {
+        return NumberFormatException("For input string: \"" + s + "\"");
+    }
+
+    // Equivalent of Integer.parseInt(String, int): an optional sign
+    // character followed by digits of the given radix; the result must fit
+    // in a signed 32-bit int, otherwise NumberFormatException is thrown.
+    static int parseInt(const std::string& s, int radix) {
+        if (s.empty()) {
+            throw forInputString(s);
+        }
+        std::size_t i = 0;
+        bool negative = false;
+        if (s[0] == '+' || s[0] == '-') {
+            negative = (s[0] == '-');
+            ++i;
+        }
+        if (i == s.size()) {
+            throw forInputString(s);
+        }
+        const long long limit = negative ? 2147483648LL : 2147483647LL;
+        long long result = 0;
+        for (; i < s.size(); ++i) {
+            const int digit = digitValue(s[i], radix);
+            if (digit < 0) {
+                throw forInputString(s);
+            }
+            if (result > (limit - digit) / radix) {
+                throw forInputString(s);
+            }
+            result = result * radix + digit;
+        }
+        return negative ? static_cast<int>(-result) : static_cast<int>(result);
+    }
+};
+
+} // namespace example
+} // namespace org

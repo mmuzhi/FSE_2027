@@ -150,885 +150,919 @@ Output only the translated cpp code in a code block.
 
 === REASONING ===
 <think>
-Let me analyze this Java code and translate it to C++.
+Let me analyze the Java code carefully to translate it to C++ with identical behavior.
 
-The Java code is an `AccessGatewayFilter` class that:
-1. `filter(Map<String, Object> request)` - takes a request map, gets "path" and "method" (method is unused actually), checks if URI starts with "/api" or "/login", then tries to get JWT user, checks user level > 2, and if so logs and returns true; otherwise false.
-2. `isStartWith(String requestUri)` - checks if URI starts with "/api" or "/login"
-3. `getJwtUser(Map<String, Object> request)` - gets Authorization token from headers, extracts user and jwt, checks if jwt starts with user name, parses date from jwt remainder, checks if now - 3 days is after jwt date (i.e., jwt is older than 3 days), returns null if expired, otherwise token.
-4. `setCurrentUserInfoAndLog(Map<String, Object> user)` - prints name + address + today's date.
+The Java code:
+1. `filter(Map<String, Object> request)` - gets "path" and "method" from request map
+2. `isStartWith(requestUri)` - checks if URI starts with "/api" or "/login"
+3. `getJwtUser(request)` - extracts token from headers->Authorization, checks jwt expiry
+4. `setCurrentUserInfoAndLog(user)` - prints message
 
-To translate to C++, I need to represent `Map<String, Object>`. The idiomatic C++ equivalent would be a `std::map<std::string, std::any>` or use `nlohmann::json`. But the instruction says to keep behavior identical. Let me think about what's the cleanest way.
+Key behaviors to replicate:
+- The `filter` method: if URI starts with /api or /login, return true. Otherwise try to get JWT user; if user level > 2, log and return true. On exception, return false. Default return false.
+- `getJwtUser`: gets token map from headers.Authorization. Gets user map and jwt string. If jwt starts with user's name, parse the date after the name, and if now - 3 days is after jwtDate, return null. Otherwise return the token map.
+- Exception cases: if request.get("headers") is null, or Authorization is null, casting issues, user.get("level") not an int, etc. — all caught by the try-catch in filter, returning false.
+- If token is null (returned from getJwtUser when jwt expired), then `token.get("user")` throws NullPointerException → caught → return false. So an expired jwt also returns false.
+- `setCurrentUserInfoAndLog`: `user.get("name") + host + LocalDate.now()` — string concatenation of name (Object), host (String), and LocalDate. In Java, `Object + String` calls toString(). LocalDate.now().toString() gives ISO-8601 format "yyyy-MM-dd". So the message is name + host + "2023-..." (date in ISO format).
 
-Using `std::any` is problematic because casting between types (e.g., `(int) user.get("level")` where level might be stored as int) — with std::any we'd do `std::any_cast<int>(user.at("level"))`. Also `user.get("name") + host` — string concatenation with Object... In Java, `user.get("name") + host` calls toString on the object. Hmm.
+Wait, important detail: in `filter`, if `getJwtUser` returns null (expired jwt), then `token.get("user")` throws NPE → catch → return false. So expired → false.
 
-Alternatively, use `nlohmann::json` library which behaves very similarly to a dynamic map. That's a third-party library though. The problem says "Use idiomatic cpp only when it does not change behavior."
+Also in `filter`, if `getJwtUser` throws (e.g., headers missing, Authorization missing, jwt not starting with name is fine — that just returns token), the exception propagates to the catch in filter → return false.
 
-Let me think about a self-contained approach using `std::map<std::string, std::any>` or a variant type.
+If jwt doesn't start with user name, token returned as-is → then user level check.
 
-Actually, a common approach for such translations: define a `JsonObject` type or use `std::unordered_map<std::string, std::any>`. But nested maps with `std::any` require careful casting.
+In getJwtUser, `user.get("name")` — if user is null (token.get("user") returns null), then calling `.get("name")` on null... wait, actually `jwt.startsWith((String) user.get("name"))` — if user is null, NPE. If user.get("name") is null, `jwt.startsWith(null)` throws NPE. So various failure modes.
 
-Let me define:
-```cpp
-using Map = std::map<std::string, std::any>;
+Now, `LocalDate.now().minusDays(3).isAfter(jwtDate)` — jwtDate must be more than 3 days old for return null. If parsing fails, DateTimeParseException → caught in filter → false.
+
+Now for C++ translation:
+
+I need to model `Map<String, Object>`. In C++, a natural choice is `std::map<std::string, std::any>` or a custom variant type. But to keep behavior identical including "casting" exceptions, I could use `std::any` with `std::any_cast` which throws `std::bad_any_cast`.
+
+Design:
+- `using Object = std::any;` and `using Map = std::map<std::string, Object>;`
+- Java `null` → we can represent as... hmm. In Java, `request.get("path")` returns null if missing. Casting null to String gives null. Then `requestUri.startsWith(s)` throws NPE if requestUri is null. In C++, if key missing from map, `map.at()` throws or `[]` inserts empty. 
+
+Let me think about how to model missing keys. With `std::map::operator[]`, missing key default-constructs `std::any{}` (empty any). Then `std::any_cast<std::string>(empty_any)` throws `bad_any_cast` — analogous to Java ClassCastException... but in Java, casting null to String succeeds (null), and then `null.startsWith` throws NPE — both result in exception → caught → return false. So behavior (return false) is same.
+
+But wait — there's a subtlety: `request.get("path")` returning null and being cast to String — in Java that's fine (null). Then `isStartWith(requestUri)` — if requestUri is null, `requestUri.startsWith(s)` throws NPE, which propagates out of `filter`? No wait — `isStartWith` is called BEFORE the try block! Look:
+
+```java
+if (isStartWith(requestUri)) {
+    return true;
+}
 ```
 
-Hmm, but `std::any` can hold `Map` recursively — but `Map` must be complete before... Actually `std::any` can hold incomplete? No, `std::any` requires complete type when constructing. We can use a forward declaration with `std::map<std::string, std::any>` — `std::any` is fine because instantiation happens at use. Actually defining `using Map = std::map<std::string, std::any>` where Map contains `std::any` which could contain a Map — that's fine since `std::any` uses type erasure; the map value type is `std::any` which is complete. Recursion is through dynamic allocation inside `std::any`, so no incomplete type issue.
+This is outside the try. So if requestUri is null, NPE propagates out of `filter` — uncaught! Hmm, that's an edge case. If "path" is missing from the request, Java throws NPE from filter.
 
-Now the operations:
+Hmm, do I need to replicate that? The instruction says "Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions." So ideally yes — if path is missing, an exception propagates.
 
-1. `filter`:
+In C++, if I use `map.at("path")` and it throws `std::out_of_range`... that's analogous. But if the key exists with a null-like value... Java's map.get returns null for missing key OR null value. 
+
+Let me design more carefully:
+
+Option: Use `std::map<std::string, std::any>` with helper functions:
+- `get(Map&, key)` returns `Object*` or something... Hmm.
+
+Actually let me think about what "Object" values we need: String, int, Map. So `std::any` holding `std::string`, `int`, or `Map`.
+
+For Java null semantics: a missing key or null value. With std::any, an empty any (`std::any{}`) can represent null. But `map["missing"]` would insert empty any — a side effect (modifies the map). Java's `get` doesn't modify. Hmm, side effects matter. But for `const Map&` parameter, `operator[]` won't compile, forcing `.at()` or `.find()`.
+
+Let me write a helper:
+
+```cpp
+static const std::any* get(const Map& m, const std::string& key) {
+    auto it = m.find(key);
+    if (it == m.end()) return nullptr;
+    return &it->second;
+}
+```
+
+Then Java `(String) request.get("path")`:
+- if get returns nullptr → Java result is null.
+- if any holds string → result is string.
+- if any holds something else → ClassCastException.
+
+For simplicity and to keep this manageable, I'll model:
+
+```cpp
+using Object = std::any;
+using Map = std::map<std::string, Object>;
+```
+
+And helpers mimicking Java behavior:
+
+```cpp
+// Java: (String) map.get(key) — returns std::optional<std::string>? 
+```
+
+Hmm, this gets complicated with null propagation. Let me trace through which null cases actually matter:
+
+In `filter`:
+1. `requestUri = (String) request.get("path")` — null if missing.
+2. `method = (String) request.get("method")` — unused (well, assigned but never used).
+3. `isStartWith(requestUri)` — NPE if requestUri null (uncaught exception propagates from filter).
+4. Inside try:
+   - `token = getJwtUser(request)` — may return null or throw.
+   - `user = (Map) token.get("user")` — NPE if token null; null if key missing.
+   - `(int) user.get("level")` — NPE if user null; ClassCastException/NPE if level not Integer. Note: `(int) user.get("level")` — if level is null, unboxing NPE. If level is Integer, unboxes fine.
+   - `setCurrentUserInfoAndLog(user)` — accesses user.get("address") and user.get("name"), concatenates. `user.get("name") + host` — if name is null, "null" string is concatenated! Java string concat with null gives "null". And `host` could be null → "null". So message could be "nullnull2023-01-01". Interesting edge case.
+   - `LocalDate.now()` in message: `String.valueOf(LocalDate)` → LocalDate.toString() → ISO format "yyyy-MM-dd".
+
+So in `setCurrentUserInfoAndLog`, null name/address become the literal string "null". That's an important behavior.
+
+In `getJwtUser`:
+- `token = (Map) ((Map) request.get("headers")).get("Authorization")` — NPE if headers missing (calling .get on null); null token if Authorization missing.
+- `user = (Map) token.get("user")` — NPE if token null.
+- `jwt = (String) token.get("jwt")` — null if missing.
+- `if (jwt.startsWith((String) user.get("name")))` — NPE if jwt null, NPE if user null, NPE if user.get("name") null (startsWith(null) throws NPE), CCE if name not String.
+- `jwt.substring(name.length())`, parse date, compare.
+- Return token.
+
+OK so to be faithful, I need:
+1. A way to represent null.
+2. NullPointerException-like exceptions caught by the try/catch in filter, but the one in `isStartWith` path propagates.
+
+Hmm wait, actually the NPE in isStartWith propagates out of filter — that's an "uncaught exception" behavior. In C++, I could throw a similar exception. But would a C++ programmer test that? The instruction says keep behavior identical including exceptions. Let me aim to model this faithfully but pragmatically.
+
+Approach: Define a small Java-like object model.
+
+Let me define:
+
+```cpp
+#include <any>
+#include <map>
+#include <string>
+#include <optional>
+#include <stdexcept>
+#include <iostream>
+#include <chrono>
+```
+
+Hmm, LocalDate handling. I need:
+- `LocalDate.now()` — current date.
+- `LocalDate.parse(str, "yyyy-MM-dd")` — parse; throws on invalid.
+- `now.minusDays(3).isAfter(jwtDate)` — date comparison.
+- `LocalDate.now().toString()` → "yyyy-MM-dd".
+
+I can use C++20 `std::chrono::year_month_day` with `std::chrono::system_clock::now()`.
+
+Parsing "yyyy-MM-dd": use `std::chrono::year_month_day` from stringstream with `%F` format... `std::chrono::parse` requires C++20 `<chrono>` streaming. Alternatively manual parsing: `std::sscanf(jwtStrDate.c_str(), "%d-%d-%d", &y, &m, &d)`.
+
+But Java's `LocalDate.parse` with "yyyy-MM-dd" is strict: exactly that format, valid date. E.g., "2023-13-01" throws DateTimeParseException. "2023-1-1" throws (month must be 2 digits? Actually with ofPattern("yyyy-MM-dd"), parsing is strict by default — ResolverStyle.STRICT? Actually DateTimeFormatter.ofPattern uses ResolverStyle.SMART by default. Hmm, but the pattern yyyy-MM-dd with SMART... "2023-1-1" — MM requires 2 digits in strict parsing of pattern letters; pattern parsing for numeric fields requires the exact number of digits unless adjacent value parsing. So "2023-1-1" would fail. "2023-01-01" works.
+
+For a faithful translation, I'll implement a parse function that:
+- Checks format yyyy-MM-dd (4 digits, dash, 2 digits, dash, 2 digits).
+- Validates ranges: year, month 1-12, day 1-days-in-month.
+
+Actually with SMART resolver, day 31 in a 30-day month would throw ("Invalid date"), day 29 Feb non-leap throws. Year "0000"? yyyy accepts years 0000-9999 (with era). LocalDate range is -999999999 to 999999999, but yyyy pattern is limited to 4 digits, years 0000-9999 where 0000 is year 0 (1 BC? with era AD... hmm, yyyy with uuuu vs yyyy — yyyy is year-of-era, needs era; without era, default is AD for positive. Year 0000 with era AD would be... year-of-era 0 doesn't exist in ISO (era BC starts at 1). Actually with SMART resolution, year-of-era 0000... hmm, this is deep. Let me not go crazy; I'll validate: 4 digits year, month 01-12, day 01-31 with month/day validity, which covers the practical cases.
+
+Let me write:
+
+```cpp
+static std::chrono::year_month_day parseLocalDate(const std::string& s) {
+    // strict yyyy-MM-dd
+    if (s.size() != 10 || s[4] != '-' || s[7] != '-') throw ...;
+    for digits check...
+    int y = ..., m = ..., d = ...;
+    std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{m}, std::chrono::day{d}};
+    if (!ymd.ok()) throw ...;
+    return ymd;
+}
+```
+
+`ymd.ok()` checks validity including leap years. 
+
+LocalDate.now():
+
+```cpp
+static std::chrono::year_month_day localDateNow() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tmv{};
+    localtime_r(&t, &tmv); // POSIX
+    ...
+}
+```
+
+Hmm, `localtime_r` is POSIX. For portability, could use `std::chrono::current_zone()` (C++20) but requires tz database. Java's LocalDate.now() uses system default timezone. Hmm. Simpler: use `std::chrono::system_clock::now()`, convert to `time_t`, then use `std::localtime` (not thread-safe, but Java's LocalDate.now() is). Or use days-based conversion with `std::chrono::zoned_time`. 
+
+Alternative approach avoiding timezone headaches: use `std::chrono::system_clock::now()`, cast to `sys_days`. That's UTC. Java's LocalDate.now() is zone-dependent. Hmm, but for a translation, UTC vs local — edge case. Given typical test harnesses run same-day, probably fine either way. But to be more faithful, use localtime.
+
+Let me do:
+
+```cpp
+static std::chrono::year_month_day localDateNow() {
+    std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    return std::chrono::year_month_day{
+        std::chrono::year{tmv.tm_year + 1900},
+        std::chrono::month{static_cast<unsigned>(tmv.tm_mon + 1)},
+        std::chrono::day{static_cast<unsigned>(tmv.tm_mday}};
+}
+```
+
+Actually, cleaner with C++20: 
+
+```cpp
+auto now = std::chrono::system_clock::now();
+auto days = std::chrono::floor<std::chrono::days>(now);
+std::chrono::year_month_day ymd{days};
+```
+
+That's UTC-based. Java LocalDate.now() uses local zone. If local zone = UTC, identical. Since most test environments are UTC, either works. Hmm, but to be safe with localtime, the tm approach is fine. localtime_r/localtime_s are platform-specific but widely available. Or `std::localtime` with mutex... Let me just use the platform-conditional localtime_r/localtime_s — that's common practice.
+
+Actually, let me reconsider: do I even need full chrono? I could implement dates as simple integers (days since epoch or yyyymmdd as integer) with manual arithmetic for minusDays. That requires leap-year day arithmetic. Using `std::chrono::year_month_day` and `sys_days` handles that: `ymd - std::chrono::days{3}` via converting: 
+
+```cpp
+std::chrono::year_month_day minus3 = std::chrono::year_month_day{std::chrono::sys_days{ymd} - std::chrono::days{3}};
+```
+
+And `isAfter`: `std::chrono::sys_days{a} > std::chrono::sys_days{b}` or compare year_month_day directly — `year_month_day` supports comparison operators? Yes, C++20 `year_month_day` has operator<=> I believe (it's comparable via operator<=> in chrono). Actually yes, `operator<=>` is defined for year_month_day comparing... let me recall: `std::chrono::year_month_day` has `constexpr bool operator==(const year_month_day&, const year_month_day&)` and `operator<=>`? Checking cppreference: yes, `operator==` and `operator<=>` are defined (C++20). But the comparison semantics: it compares as if by sys_days? Hmm, actually for `year_month_day`, comparison operators are defined... Let me think. cppreference says:
+
+```
+constexpr bool operator==(const year_month_day& x, const year_month_day& y) noexcept;
+constexpr std::strong_ordering operator<=>(const year_month_day& x, const year_month_day& y) noexcept;
+```
+
+Hmm wait, does it? I recall `year_month_day` has operator== and operator<=> defined comparing x.y(), x.m(), x.d()? Let me check... Actually I believe for `year_month_day`: "Compares two year_month_day objects... This comparison is not based on the calendar date, but on the underlying representation"? No wait. Hmm.
+
+From cppreference for std::chrono::year_month_day:
+
+```
+operator==, operator<=> 
+(C++20) compares two year_month_day values
+```
+
+And: "Compares two year_month_day x and y... Equivalent to: x.year() == y.year() && ... "? Actually I remember there being a note that comparison is lexicographic by year, month, day — which for valid dates matches chronological order. Since year_month_day fields (year, month, day) lexicographic ordering equals chronological ordering for valid dates, that works.
+
+Hmm, actually let me double check — I recall for `year_month_day`: `operator<=>` compares `std::tie(x.year(), x.month(), x.day())` with y's. Year, month, day each have operator<=>. So yes lexicographic. For valid dates, that's chronological. Good.
+
+But safer and unambiguous: convert to `sys_days` and compare:
+
+```cpp
+bool isAfter = std::chrono::sys_days{a} > std::chrono::sys_days{b};
+```
+
+`sys_days` is `time_point<system_clock, days>`, comparable. Good.
+
+Now, "yyyy-MM-dd" toString for the log message: 
+
+```cpp
+std::string toString(const std::chrono::year_month_day& d) {
+    char buf[11];
+    std::snprintf(buf, sizeof buf, "%04d-%02u-%02u", int(d.year()), unsigned(d.month()), unsigned(d.day()));
+    return buf;
+}
+```
+
+Note: Java's LocalDate.toString() uses 4-digit year, zero padded, with negative years like "-0001-01-01" but years from parsing yyyy are 0000-9999. `%04d` matches.
+
+Now the Object model. Let me think about what's cleanest and most faithful.
+
+Given values can be: `std::string`, `int`, `Map` (and null). I'll use `std::any`.
+
+```cpp
+using Object = std::any;
+using Map = std::map<std::string, Object>;
+```
+
+Hmm, but a problem: `Map` recursively contains `Object` which can be `Map`. Forward declaration needed:
+
+```cpp
+using Object = std::any; // can't hold incomplete Map
+```
+
+`std::any` requires the contained type to be complete at the point of `any_cast`/constructing. `std::map<std::string, std::any>` where any will hold `Map` = `std::map<std::string, std::any>` — this is recursive but through type erasure, so it's fine: when we construct `std::any(mapValue)`, Map is complete by then if we define the alias first and use it after. Like:
+
+```cpp
+using Object = std::any;
+using Map = std::map<std::string, Object>;
+```
+
+`Map` is complete at its definition (std::any doesn't need Map complete for map instantiation — map<string, any> just needs any). Then storing a Map inside an any: `Object m = someMap;` — Map is complete. Fine. This works.
+
+Alternatively, define a `JavaObject` variant:
+
+```cpp
+struct JObject; 
+using JMap = std::map<std::string, JObject>;
+struct JObject {
+    std::variant<std::monostate, std::string, int, JMap> value; // monostate = null
+};
+```
+
+Hmm, variant approach with explicit null handling might be cleaner for faithful null semantics. But std::any with helpers also works. Let me think about which produces cleaner code for the required operations:
+
+Operations needed:
+1. `get(map, key)` → Object or null (missing → null).
+2. Cast to String: null → null; String → string; else → ClassCastException.
+3. Cast to Map: null → null; Map → map; else → CCE.
+4. Cast to int (unboxing): Integer → int; null → NPE; else → CCE.
+5. String concat with null → "null".
+6. `String.startsWith(prefix)`.
+7. `String.substring(len)` — if len > length, throws StringIndexOutOfBoundsException.
+
+Exceptions in filter's try are caught (Exception), so any exception type works as long as it derives from a common base we catch (std::exception) — but careful: the isStartWith NPE must NOT be caught (it's outside try). In C++ I'll just not have a try around it.
+
+So plan: define exception classes or just use std::runtime_error for all Java runtime exceptions. Since everything gets caught as `Exception` in Java → in C++ catch `std::exception` (or a custom JavaException base). The isStartWith path: if requestUri is null → in C++ throw, uncaught → propagates out of filter → program terminates if unhandled (Java also would propagate). Behavior "identical" in the sense of exception propagation.
+
+Hmm, but wait — do I really want filter to throw when "path" is missing? In Java yes: `requestUri.startsWith(s)` NPEs. Let me replicate: if path is null, throw. But hold on — actually, let me re-check: is `isStartWith` called with null requestUri possible? `request.get("path")` returns null if no "path" key. Cast null to String → null. Then `requestUri.startsWith(s)` → NPE. Yes.
+
+But hmm, one more consideration: what if "path" exists but is not a String? `(String) request.get("path")` → ClassCastException, also outside try → propagates. OK.
+
+So in C++ filter:
+
 ```cpp
 bool filter(const Map& request) {
-    std::string requestUri = std::any_cast<std::string>(request.at("path"));
-    // method is retrieved but unused
-    std::string method = std::any_cast<std::string>(request.at("method"));
+    // String requestUri = (String) request.get("path");
+    std::string requestUri = expectString(getOrNull(request, "path")); // may throw if not string
+    // if null → later isStartWith throws NPE
+    ...
+}
+```
 
-    if (isStartWith(requestUri)) {
-        return true;
-    }
+Hmm wait, but if requestUri is null, Java's cast succeeds (null), and only fails later at startsWith. In C++ I need to carry null-ness until isStartWith. Let me use `std::optional<std::string>` internally or handle via the any directly.
 
-    try {
-        Map token = getJwtUser(request);
-        Map user = std::any_cast<Map>(token.at("user"));
-        if (std::any_cast<int>(user.at("level")) > 2) {
-            setCurrentUserInfoAndLog(user);
-            return true;
-        }
-    } catch (...) {
-        return false;
+Let me define helper functions mirroring Java semantics:
+
+```cpp
+// Mimics Java cast (String) obj where obj may be null.
+// Returns nullptr-ish representation...
+```
+
+Maybe simpler: represent Java null as empty `std::any` (i.e., `std::any{}` has no value → treat as null). Then:
+
+```cpp
+static const Object* mapGet(const Map& m, const std::string& key) {
+    auto it = m.find(key);
+    return it == m.end() ? nullptr : &it->second;
+}
+```
+
+Java `map.get(k)` returns null both when key missing and when value is null. So:
+
+```cpp
+static Object mapGet(const Map& m, const std::string& key) {
+    auto it = m.find(key);
+    if (it == m.end()) return Object{}; // null
+    return it->second; // copy; could be empty any = stored null
+}
+```
+
+Copying maps could be expensive; better to return const refs or pointers. Let me use pointers with nullptr meaning null:
+
+Actually, cleanest: helper `asX` functions taking `const Object&`:
+
+```cpp
+static bool isNull(const Object& o) { return !o.has_value(); }
+
+// Java: (String) x — throws ClassCastException if x is non-null non-String; returns null if null.
+static std::string castString(const Object& o) { ... }
+```
+
+But null needs to flow. Let me define a small wrapper... Hmm.
+
+Alternative cleaner design: define my own value type:
+
+```cpp
+struct Value {
+    // null, string, int, map
+    enum class Type { Null, String, Int, Map } type = Type::Null;
+    std::string str;
+    int64_t i;
+    std::map<std::string, Value> map;
+};
+```
+
+Hmm, that's heavy but explicit. Or use `std::variant`:
+
+```cpp
+struct JMap; // fwd
+using JValue = std::variant<std::monostate, std::string, int, std::shared_ptr<JMap>>?
+```
+
+Hmm. Let me think about the interface users would use. The Java class is `AccessGatewayFilter` with `filter(Map<String, Object> request)`. A C++ caller would construct a `std::map<std::string, ?>` with nested maps, strings, ints. 
+
+Honestly, `std::any` is the most direct analog of `Object`. Let me go with:
+
+```cpp
+#include <any>
+#include <map>
+#include <string>
+
+using Object = std::any;
+using StringMap = std::map<std::string, Object>;
+```
+
+Name it `Map`? In C++, `Map` as identifier is fine (no conflict). But shadowing std map names... it's fine. Let me call it `Map` to mirror Java. Actually within a namespace `org::example`? The Java package is org.example. I could use `namespace org { namespace example {`. That's a nice touch for translation fidelity. Hmm, or just keep it simple. I'll wrap in namespace org::example to mirror the package, maybe. Or skip namespace. The instructions say translate; keeping a namespace mirrors the package. I'll include it — harmless.
+
+Now helpers:
+
+```cpp
+// Java-like exceptions
+struct RuntimeException : std::runtime_error { using std::runtime_error::runtime_error; };
+struct NullPointerException : RuntimeException { ... };
+struct ClassCastException : RuntimeException { ... };
+struct DateTimeParseException : RuntimeException { ... };
+```
+
+Actually, do I need distinct types? Only for fidelity of uncaught propagation; types don't matter for behavior here since everything's caught as Exception (or propagates). I'll create a couple for clarity but it's optional. Let me keep a simple hierarchy: `JavaException : std::runtime_error` with subclasses. Fine.
+
+Helper: get value from map as Java does:
+
+```cpp
+static const Object* get(const Map& m, const std::string& key) {
+    auto it = m.find(key);
+    return it == m.end() ? nullptr : &it->second;
+}
+```
+
+Returns nullptr for missing key. But a stored null (empty any) also needs handling: `isNull(*ptr)`.
+
+Cast helpers:
+
+```cpp
+static const std::string& castString(const Object& o) {
+    // throws ClassCastException if not string and not null; if null... 
+}
+```
+
+Hmm, the null problem again. Java `(String) null` = null, and you can then test or call methods on it (NPE). So a "cast" that returns something nullable. Use `const std::string*`:
+
+```cpp
+static const std::string* castString(const Object* o) {
+    if (!o || !o->has_value()) return nullptr; // null
+    const std::string* s = std::any_cast<std::string>(&*o); // wait, any_cast<const string*>(&any)
+    if (!s) throw ClassCastException(...);
+    return s;
+}
+```
+
+Wait — `std::any_cast<T>(const any*)` returns `const T*` or nullptr if wrong type. 
+
+Hmm, but this double-null (missing vs stored-null vs cast-null) is getting complicated. Let me simplify by combining: represent everything through `const Object*` where nullptr = Java null (either missing key or stored null — Java can't distinguish via get anyway... well, containsKey can, but not used here).
+
+Wait, but stored null: `std::any{}` (empty) stored in map. Then `get` returns pointer to empty any, not nullptr. To unify: in `get`, if the any is empty, return nullptr:
+
+```cpp
+static const Object* get(const Map& m, const std::string& key) {
+    auto it = m.find(key);
+    if (it == m.end() || !it->second.has_value()) return nullptr;
+    return &it->second;
+}
+```
+
+Then nullptr uniformly = Java null. But then cast functions take `const Object*`:
+
+```cpp
+static const std::string* castString(const Object* o) {
+    if (!o) return nullptr;               // null cast to String stays null
+    if (const std::string* s = std::any_cast<std::string>(o))
+        return s;
+    throw ClassCastException("cannot cast to String");
+}
+```
+
+Hmm wait, `std::any_cast<std::string>(const any*)` — the pointer overload: `template<class T> const T* any_cast(const any* operand) noexcept;` returns nullptr if operand is null or wrong type. Since we've ensured o is non-null-pointer and has_value... Actually the any_cast pointer overload checks `operand != nullptr && operand->type() == typeid(T)`. So:
+
+```cpp
+static const std::string* castString(const Object* o) {
+    if (!o) return nullptr;
+    if (auto* s = std::any_cast<std::string>(o)) return s;
+    throw ClassCastException(...);
+}
+```
+
+Similarly for Map:
+
+```cpp
+static const Map* castMap(const Object* o) {
+    if (!o) return nullptr;
+    if (auto* m = std::any_cast<Map>(o)) return m;
+    throw ClassCastException(...);
+}
+```
+
+And int unbox:
+
+```cpp
+static int castInt(const Object* o) {  // Java: (int) obj — unboxing
+    if (!o) throw NullPointerException("null cannot be unboxed to int");
+    if (auto* i = std::any_cast<int>(o)) return *i;
+    throw ClassCastException("cannot cast to int");
+}
+```
+
+Now translating each method:
+
+**isStartWith:**
+
+```cpp
+bool isStartWith(const std::string& requestUri) const {
+    static const std::string startWith[] = {"/api", "/login"};
+    for (const std::string& s : startWith) {
+        if (requestUri.rfind(s, 0) == 0) return true; // startsWith
     }
     return false;
 }
 ```
 
-Wait — in Java, `getJwtUser` can return `null`, and then `token.get("user")` would throw NullPointerException, caught by the catch block, returning false. In C++, if getJwtUser returns something like `std::optional<Map>` or a null representation... Hmm.
+C++20 has `string_view::starts_with` and C++20 `std::string::starts_with`. If I target C++20 (needed for chrono year_month_day anyway), `requestUri.starts_with(s)` works. I'm using C++20 chrono features, so assume C++20. `std::string::starts_with` — C++20. Good.
 
-To mimic: if getJwtUser returns null token, then `token.get("user")` throws NPE → caught → return false. In C++, I could have `getJwtUser` return `std::any` (possibly empty any), and then `any_cast` on empty any throws `bad_any_cast`, caught by catch(...) → return false. That mimics behavior nicely!
-
-Actually let me model it more carefully:
-
-Java behavior in `filter`:
-- If "path" missing or not a String → ClassCastException/NullPointerException — wait, these are NOT caught! The try block starts after isStartWith check. So `request.get("path")` cast failure would throw uncaught exceptions. Hmm, in Java:
-  - `String requestUri = (String) request.get("path");` — if path is null (missing), cast of null succeeds (null can be cast to String), so requestUri is null. Then `isStartWith(requestUri)` → `requestUri.startsWith(s)` → NullPointerException! That's uncaught and propagates.
-  
-Hmm, but this is a translation exercise. Let me think about what level of fidelity is expected. The typical approach for these translation tasks (looks like from a benchmark like "Java to C++ translation") is to produce a reasonable C++ equivalent.
-
-Let me think about the "level" comparison: `(int) user.get("level")` — in Java, if user.get("level") is an Integer, unboxing works. If it's something else, ClassCastException. In the test data, presumably it's an Integer. In C++ with std::any, we'd store `int` and any_cast<int>.
-
-But wait — in Java, small integers in maps are often... if the map is constructed via JSON parsing, level could be Integer. Let's just use int.
-
-Hmm, but actually with nlohmann::json, numbers are int/int64/double. This translation task — the original code seems to be from a coding benchmark (looks like ClassEval or similar). The typical C++ translation would use `nlohmann::json` or a custom map type.
-
-Given the constraints ("avoid bouncing between partial code and repeated redesign"), I should produce one clean, complete translation. Let me decide on the representation:
-
-Option A: Use `std::map<std::string, std::any>` (or unordered_map). Self-contained, standard library only.
-
-Option B: Use nlohmann::json. Third-party but very convenient. Might not be available.
-
-I'll go with Option A using standard library only, since it doesn't require external dependencies.
-
-Now, about the "null token" case. In Java, `getJwtUser` returns `Map<String, Object>` which can be null. Then in filter, `token.get("user")` on null throws NPE → caught → return false.
-
-In C++ with std::any: `getJwtUser` returns `std::any`. If expired, return `std::any{}` (empty). Then `std::any_cast<Map>(token)` on empty any throws `std::bad_any_cast` → caught → return false. 
-
-But wait, the signature says `public Map<String, Object> getJwtUser(...)`. In C++ I could declare it as returning `std::any` or `std::optional<Map>`. Returning `std::any` keeps the "can be null" semantics and makes the subsequent failure natural. Alternatively return `Map` and... can't return null. Hmm.
-
-Actually, let me reconsider: maybe the cleanest is to have getJwtUser return `std::optional<Map>` and in filter check... but the Java code doesn't check for null explicitly — it relies on NPE being caught. Behavior-wise: null token → exception → return false. With optional, I'd need to either check `if (!token) throw ...` or dereference which throws bad_optional_access → caught. Actually dereferencing an empty optional is UB, but `token->at("user")` — `optional::operator->` on empty optional is UB. Better to use `token.value()` which throws `bad_optional_access`. Hmm.
-
-Let me design so behavior matches:
+But wait — the null requestUri case: if path is null, Java NPEs *inside* isStartWith at `requestUri.startsWith(s)`. In my C++ translation, I'd need filter to handle null path before calling isStartWith, throwing NPE at the same logical point. Let me handle in filter:
 
 ```cpp
-std::any getJwtUser(const Map& request) {
-    Map token = std::any_cast<Map>(std::any_cast<Map>(request.at("headers")).at("Authorization"));
-    Map user = std::any_cast<Map>(token.at("user"));
-    std::string jwt = std::any_cast<std::string>(token.at("jwt"));
-
-    if (jwt.rfind(std::any_cast<std::string>(user.at("name")), 0) == 0) {
-        std::string name = std::any_cast<std::string>(user.at("name"));
-        std::string jwtStrDate = jwt.substr(name.length());
-        // parse yyyy-MM-dd
-        std::tm tm = {};
-        std::istringstream ss(jwtStrDate);
-        ss >> std::get_time(&tm, "%Y-%m-%d");
-        ...
-    }
-    return token;
+bool filter(const Map& request) {
+    const Object* pathObj = get(request, "path");
+    // String requestUri = (String) request.get("path");
+    // If not a String and not null → ClassCastException (outside try → propagates)
+    const std::string* requestUri = castString(pathObj); // may throw CCE
+    // (request.get("method") — cast to String; unused but side effect: CCE if not string? In Java, (String) request.get("method") — if method is not a String → CCE outside try → propagates! Hmm.)
+    ...
 }
 ```
 
-Hmm, date handling. Java:
-```java
-DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-LocalDate jwtDate = LocalDate.parse(jwtStrDate, formatter);
-if (LocalDate.now().minusDays(3).isAfter(jwtDate)) {
-    return null;
-}
-```
+Wait, `String method = (String) request.get("method");` — if "method" maps to a non-String non-null object, ClassCastException thrown outside try → propagates out of filter. Edge case! To be faithful:
 
-So if (now - 3 days) > jwtDate, i.e., jwtDate is more than 3 days ago, token expired → null.
-
-In C++, using `<chrono>` (C++20 has year_month_day and civil calendar functions). Or use C-style `std::get_time` and `std::mktime`/`timegm`.
-
-C++20 approach:
 ```cpp
-#include <chrono>
-using namespace std::chrono;
-
-year_month_day parseDate(const std::string& s) {
-    std::istringstream ss(s);
-    std::tm tm{};
-    ss >> std::get_time(&tm, "%Y-%m-%d");
-    if (ss.fail()) throw std::runtime_error("parse error");
-    return year{tm.tm_year + 1900} / (tm.tm_mon + 1) / tm.tm_mday;
-}
+const std::string* method = castString(get(request, "method")); // may throw CCE
+(void)method; // unused
 ```
+
+Hmm, but actually since it's unused, some might drop it. But behavior: CCE if method is, say, an Integer. To be faithful, keep the cast. I'll keep it with a (void) or [[maybe_unused]].
 
 Then:
-```cpp
-auto now = floor<days>(system_clock::now());
-year_month_day today{now};
-year_month_day jwtDate = ...;
-// now - 3 days > jwtDate?
-sys_days todaySys = floor<days>(system_clock::now());
-sys_days threeDaysAgo = todaySys - days{3};
-if (threeDaysAgo > sys_days{jwtDate}) return empty;
-```
-
-Actually, `LocalDate.now().minusDays(3).isAfter(jwtDate)` means (today - 3) > jwtDate. So if jwtDate < today - 3, expired.
-
-Alternatively, simpler: convert both to day counts.
-
-Using C-style time:
-```cpp
-std::tm tm{};
-std::istringstream ss(jwtStrDate);
-ss >> std::get_time(&tm, "%Y-%m-%d");
-if (ss.fail()) throw std::runtime_error(...);
-tm.tm_hour = 12; // avoid DST issues
-time_t t = timegm(&tm); // or _mkgmtime on Windows
-```
-
-Hmm, timegm is POSIX, not standard C++ (it is in POSIX and glibc; on MSVC it's _mkgmtime). For portability, C++20 chrono is better. But C++20 chrono's `std::get_time`... no wait, `std::get_time` is C++11.
-
-Let me think about whether to use C++20 or not. Many compilers now support C++20 chrono. But to be safe, maybe implement a manual date-to-days conversion (days from civil epoch algorithm by Howard Hinnant):
 
 ```cpp
-long daysFromCivil(int y, unsigned m, unsigned d) {
-    y -= m <= 2;
-    const int era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(y - era * 400);            // [0, 399]
-    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;  // [0, 365]
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;           // [0, 146096]
-    return era * 146097 + static_cast<long>(doe) - 719468;
+if (requestUri != nullptr) {
+    if (isStartWith(*requestUri)) return true;
+} else {
+    throw NullPointerException("requestUri is null"); // Java: NPE at startsWith
 }
 ```
 
-And today's date via `std::time` + `gmtime` (or localtime — Java's LocalDate.now() uses the system default timezone, which is typically local time). Hmm, LocalDate.now() uses local timezone. `std::localtime` gives local time. 
+Hmm wait, order matters: Java evaluates `requestUri.startsWith(s)` in the loop — first iteration s="/api". NPE regardless. So if requestUri is null → NPE. Equivalent: throw before/inside. But hold on — what if isStartWith's array were empty... it's not. So throwing NPE when null is faithful.
 
-Actually let me think about what level of fidelity matters here. This looks like it's from a benchmark where the test harness would construct a map and call filter. The date logic: parse jwt date, compare with now-3days. The exact timezone handling probably doesn't matter much for tests, but to be closest to Java's LocalDate.now() (local zone), use localtime.
+Hmm, but actually wait. Let me reconsider: should isStartWith take a nullable thing? In Java, isStartWith(String) with null → NPE on startsWith. If a C++ caller calls isStartWith directly with a string, no null issue. The filter method is where null can occur. I'll do the null check in filter before calling isStartWith, throwing NPE to mirror Java. Or have isStartWith take `const std::string*`... but then public API diverges from Java's. Java's isStartWith(String) — a null passed directly would NPE. C++ can't have null strings unless I use pointers/optional. 
 
-Let me structure the C++ code:
+Design decision: keep `bool isStartWith(const std::string& requestUri)` and in filter, check for null path and throw. That mirrors: the NPE happens at the startsWith call site inside isStartWith. Since exception propagates out of filter either way, behavior is identical.
 
-```cpp
-#include <any>
-#include <chrono>
-#include <ctime>
-#include <iostream>
-#include <map>
-#include <sstream>
-#include <string>
-#include <stdexcept>
+Hmm, wait, one more subtlety: the NPE would occur inside isStartWith, which is called outside the try in filter. So it propagates out of filter to the caller. In C++, throwing from filter → caller sees exception. Same.
 
-namespace org::example {
+**getJwtUser:**
 
-class AccessGatewayFilter {
-public:
-    using Map = std::map<std::string, std::any>;
-
-    AccessGatewayFilter() = default;
-
-    bool filter(const Map& request) {
-        std::string requestUri = std::any_cast<std::string>(request.at("path"));
-        std::string method = std::any_cast<std::string>(request.at("method")); // unused, kept for parity
-
-        if (isStartWith(requestUri)) {
-            return true;
-        }
-
-        try {
-            std::any token = getJwtUser(request);
-            Map user = std::any_cast<Map>(token... 
-```
-
-Hmm wait, if getJwtUser returns `std::any` containing a Map, then `std::any_cast<Map>(token)` works if token has a Map, and throws bad_any_cast if empty (null case). 
-
-But hold on — in Java, `Map<String, Object> token = getJwtUser(request); Map<String, Object> user = (Map<String, Object>) token.get("user");` — the cast `(Map<String, Object>) token.get("user")` is an unchecked cast; it succeeds even if the object isn't a Map (erasure), but then `user.get("level")` would... hmm, actually with erasure, `token.get("user")` returns Object, cast to Map succeeds at runtime only if it's actually a Map (or null) — no wait, unchecked cast to `Map<String,Object>` only checks that it's a Map, not the generic parameters. If it's not a Map, ClassCastException. If it is a Map, fine.
-
-For C++ with std::any, `any_cast<Map>` checks exact type. That's the analog.
-
-Now `(int) user.get("level")` — Java unboxes Integer to int. If level is stored as Integer, fine. In C++, we need to store level as `int` in the any. But there's a subtlety: what if tests store level as int but our any holds `size_t` or `long`? We control the translation of the whole program including how maps are built... but actually the test harness would build the maps. Since this is just a class translation, we define the convention: values are stored as std::any holding std::string, int, or nested Map.
-
-Hmm, but actually maybe I should be more lenient in the level extraction to handle int/long/etc.? The instruction says keep behavior identical. In Java, `(int) user.get("level")` requires an Integer (or the cast fails → exception → caught → return false). So exact-type check via any_cast<int> is behaviorally identical if the harness stores int.
-
-But hmm — what if the harness stores level as `int` but via a json-like lib... I can't know. Let me consider the more robust alternative: use `nlohmann::json`. Actually, many of these Java→C++ benchmark translations use nlohmann::json. The Java signature `Map<String, Object>` maps naturally to `nlohmann::json` (a json object). And `(int) user.get("level")` → `user["level"].get<int>()`. And `user.get("name") + host + LocalDate.now()` — Java string concatenation of Object + String + LocalDate → calls toString. With json: `user["name"].dump()`... hmm, that would give JSON-encoded string with quotes for strings. `user["name"].get<std::string>()` if name is a string.
-
-The print: `user.get("name") + host + LocalDate.now()` — e.g., "mac" + "127.0.0.1" + "2021-...". So message is name+address+date concatenated.
-
-LocalDate.now().toString() format: "2021-06-14" (ISO-8601, yyyy-MM-dd).
-
-So message example: "mac127.0.0.12021-06-14".
-
-In C++: `std::string message = name + host + todayString;` where todayString is yyyy-MM-dd.
-
-OK let me decide: I'll go with std::any + std::map, standard library only. This is self-contained and behavior-preserving with a clear convention.
-
-Now, edge cases to mirror:
-
-1. `request.get("path")` returns null if missing → cast succeeds → requestUri null → `requestUri.startsWith(s)` NPE (uncaught in Java, propagates out of filter). In C++: `request.at("path")` throws `std::out_of_range` — uncaught (outside try). That's analogous: an uncaught exception propagates. If I use `[]` on a non-const map, missing key creates empty any → any_cast throws bad_any_cast. With const map, `[]` doesn't exist. I'll use `.at()` which throws out_of_range — comparable to... well Java returns null and then NPE later. Either way, an exception propagates from filter. Good enough. Actually, to be even closer, I could do:
+Java returns `Map<String, Object>` — may return null (expired) or token map, or throw.
 
 ```cpp
-std::string requestUri = std::any_cast<std::string>(request.count("path") ? request.at("path") : std::any{});
-```
-No — any_cast on empty throws bad_any_cast. Java: null cast to String succeeds. Hmm. To truly mimic, if "path" missing, requestUri should be "null"-ish and isStartWith should throw NPE. This is getting too deep. The Java null-cast-succeeds behavior is impossible to replicate exactly with value semantics in C++ (no null strings). I'll note: missing "path" → in Java, NPE inside isStartWith; in C++ with .at() → out_of_range thrown from filter. Both propagate exceptions out of filter. Reasonably equivalent. Tests almost certainly always provide "path".
-
-2. `isStartWith`: `requestUri.startsWith(s)`. C++: `requestUri.rfind(s, 0) == 0` or `requestUri.compare(0, s.size(), s) == 0` (need to guard length? `compare(0, n, s)` — if requestUri shorter, it compares the substring which is shorter → non-zero unless... "abc".compare(0, 5, "abcde") → compares "abc" vs "abcde" → non-zero. Good, no out-of-bounds). So `requestUri.compare(0, s.size(), s) == 0` is safe. Or `rfind(s, 0) == 0` which is a common idiom.
-
-3. `getJwtUser`:
-```java
-Map<String, Object> token = (Map<String, Object>) ((Map<String, Object>) request.get("headers")).get("Authorization");
-```
-If headers missing → null → .get("Authorization") → NPE. But wait — getJwtUser is called inside the try block in filter, so NPE → caught → return false. So in C++, getJwtUser can throw anything (out_of_range, bad_any_cast) and it'll be caught by catch(...) in filter. 
-
-But getJwtUser is a public method — if called directly, exceptions propagate. Same as Java. Good.
-
-```java
-Map<String, Object> user = (Map<String, Object>) token.get("user");
-String jwt = (String) token.get("jwt");
-if (jwt.startsWith((String) user.get("name"))) { ... }
+const Map* getJwtUser(const Map& request) const {  // hmm, return type nullable
+    const Map* token = castMap(get(castMap(get(request, "headers")), "Authorization"));
 ```
 
-If token is null (headers present but Authorization missing → token null) → token.get("user") NPE → caught in filter → false. C++: `.at("user")` on missing → out_of_range → caught. If Authorization present but not a Map → ClassCastException in Java; bad_any_cast in C++. OK.
+Wait, careful: `(Map<String, Object>) request.get("headers")` — cast null → null; then `.get("Authorization")` on null → NPE. So:
 
-If jwt missing → null → jwt.startsWith → NPE → caught. C++: any_cast<std::string> on missing/empty → bad_any_cast → caught. OK.
-
-4. Date parsing:
-```java
-String jwtStrDate = jwt.substring(name.length());
-DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-LocalDate jwtDate = LocalDate.parse(jwtStrDate, formatter);
-```
-If jwtStrDate doesn't parse → DateTimeParseException → caught in filter → return false. C++: parse failure → throw runtime_error → caught.
-
-Note: `jwt.substring(name.length())` — if name.length() > jwt.length() → IndexOutOfBoundsException → caught. C++ `substr` throws out_of_range if pos > size → caught. Good match.
-
-Also Java's `substring` with pos == length returns "". Then parse fails → exception. C++ substr(pos == size) returns "" too. Good.
-
-Date parse with pattern "yyyy-MM-dd": Java's DateTimeFormatter with pattern yyyy-MM-dd requires exactly? Actually DateTimeFormatter.ofPattern("yyyy-MM-dd") parsing "2021-6-1" — MM requires 2 digits? Actually in parsing mode, MM requires exactly 2 digits; yyyy can be variable (1-19?). Hmm, Java pattern letters: for parsing, "M" accepts 1-2 digits, "MM" requires... Actually with pattern "MM", parsing requires exactly 2 digits? Let me recall: DateTimeFormatter pattern "MM" in strict/smart mode: the count of pattern letters determines... For numeric fields, the count determines minimum width on formatting; on parsing, "M" parses 1-2 digits, "MM" parses exactly 2 digits (in SMART resolver, appending value with fixed width). Actually yes: "MM" parses exactly 2 digits, "yyyy" parses up to 19 digits with min width 4? Hmm, "yyyy" — year of era vs year... "yyyy" is year-of-era with width 4: parses minimum 4 digits? I believe "yyyy" parses with min width 4? No wait. Let me recall precisely.
-
-Java DateTimeFormatterBuilder.appendValue(field, count): For a count of 2 (like MM, dd), it's a fixed-width parse of 2 digits. For count of 4 for year (yyyy), appendValue(YearOfEra, 4, 19, EXCEEDS_PAD)? Actually for pattern letters with count > 19 special... For numeric fields with count 1-18: if count == 2, fixed width 2; otherwise, variable width from count to 19. Hmm, I recall: "The number of pattern letters determines the minimum width... For parsing, if the count of letters is two, then... " 
-
-From javadoc of DateTimeFormatter patterns: "Numbers: If the count of letters is one, then the value is output using the minimum number of digits and without padding. Otherwise, the count of digits is used as the width of the output field... " And for parsing: a value with count of 2 parses as fixed-width 2 digits; counts 1 or 3+ parse variable width.
-
-This is getting too deep. `std::get_time(&tm, "%Y-%m-%d")` parses %Y as flexible digits, %m and %d as up to 2 digits. Close enough; tests will use well-formed dates like "2021-06-14" or "2020-10-05". Actually the typical test data for this problem (it's from ClassEval "access_gateway_filter") uses jwt strings like "mac2021-06-14..." hmm wait, actually the jwt format in tests: user name followed by date. Let me recall ClassEval problem 68 or so... The AccessGatewayFilter problem. Tests construct tokens like:
-
-```java
-Map<String, Object> user = new HashMap<>();
-user.put("name", "mac");
-user.put("password", "1234");
-user.put("address", "mac.com");
-user.put("level", 5);
-Map<String, Object> token = new HashMap<>();
-token.put("user", user);
-token.put("jwt", "mac2021-06-14");
-```
-
-Something like that. And the date compare with LocalDate.now() means tests that pass would need recent dates... Actually in ClassEval tests, they often test with dates relative to now. Whatever — I just need faithful translation.
-
-5. The comparison: `LocalDate.now().minusDays(3).isAfter(jwtDate)`. So expired iff today - 3 > jwtDate, i.e., jwtDate <= today - 4? Let's see: isAfter means strictly after. today-3 isAfter jwtDate ⟺ jwtDate < today-3 ⟺ jwtDate ≤ today-4 (in whole days).
-
-In C++, compute today's day number and jwt day number; expired iff (todayDays - 3) > jwtDays.
-
-Computing today: Java LocalDate.now() uses local timezone. C++: use `std::chrono::system_clock::now()` and convert to local... C++20 `std::chrono::zoned_time` or current_zone. Non-C++20: `std::time(nullptr)` + `std::localtime(&t)` → struct tm with local date. That's portable C++ (localtime is standard C, though not thread-safe; fine here).
-
-So:
 ```cpp
-static long todayAsDays() {
-    std::time_t t = std::time(nullptr);
-    std::tm lt = *std::localtime(&t);
-    return daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+const Map* headers = castMap(get(request, "headers")); // may throw CCE if headers is not map
+const Object* authObj = get(*headers ... // NPE if headers == nullptr
+```
+
+Java: `((Map) request.get("headers")).get("Authorization")` — if headers is null → NPE. So:
+
+```cpp
+if (!headers) throw NullPointerException(...);
+const Object* auth = get(*headers, "Authorization");
+const Map* token = castMap(auth); // null if auth null
+// token may be nullptr (Authorization missing) — Java: token = null
+const Object* userObj = get(*token, "user"); // NPE if token null
+```
+
+Wait, Java: `Map<String, Object> user = (Map<String, Object>) token.get("user");` — if token is null → NPE at token.get. So:
+
+```cpp
+if (!token) throw NullPointerException("token is null");
+const Map* user = castMap(get(*token, "user")); // may throw CCE; may be null
+const std::string* jwt = castString(get(*token, "jwt")); // may throw CCE; may be null
+
+if (jwt->startsWith((String) user.get("name"))) { ... }
+```
+
+Java: `jwt.startsWith((String) user.get("name"))`:
+- jwt null → NPE at jwt.startsWith.
+- user null → NPE at user.get("name").
+- user.get("name") null → NPE (startsWith(null) throws NPE — actually String.startsWith(null) throws NullPointerException). Also `(String) null` is fine (null), then startsWith(null) NPEs.
+- name not String → CCE at cast.
+- jwt not... jwt cast to String earlier.
+
+Then:
+
+```cpp
+if (jwt->starts_with(*name)) {
+    std::string jwtStrDate = jwt->substr(name->size()); // substring(name.length())
+    LocalDate jwtDate = parseLocalDate(jwtStrDate); // throws on invalid
+    if (isAfter(minusDays(now(), 3), jwtDate)) return nullptr;
 }
+return token;
 ```
 
-And parse jwt date:
-```cpp
-// jwtStrDate like "2021-06-14"
-int y, m, d;
-// parse strictly
-```
-Use sscanf: `sscanf(jwtStrDate.c_str(), "%d-%d-%d", &y, &m, &d)` — returns 3 on success. But Java's parse is stricter (exact format, must consume entire string). Hmm: Java LocalDate.parse("2021-06-14extra", formatter) → DateTimeParseException because unparsed text remains. With sscanf, trailing text is ignored. Behavior difference! If jwt = "mac2021-06-14abc", Java throws → filter returns false; C++ sscanf would succeed → different behavior.
+Java `jwt.substring(name.length())` — if name.length() > jwt.length() → StringIndexOutOfBoundsException. But we know jwt startsWith name, so name.length() <= jwt.length(). Fine. `substr` in C++ same behavior given the condition.
 
-But do I need to worry? The instruction says keep behavior identical including edge cases. I should implement strict parsing. Use `std::get_time` with "%Y-%m-%d" — does get_time consume the whole string? No! `std::get_time` stops after reading the format; trailing characters are not checked. `ss >> std::get_time(&tm, "%Y-%m-%d")` — after this, if there's trailing text, the stream isn't failed. So I'd need to check that the stream is fully consumed:
+`substring` semantics: `jwt.substring(n)` returns chars from n to end. `std::string::substr(n)` same. Good.
 
-```cpp
-std::istringstream ss(jwtStrDate);
-ss >> std::get_time(&tm, "%Y-%m-%d");
-if (ss.fail()) throw std::runtime_error("Invalid date");
-ss >> std::ws; // skip trailing whitespace? Java parse would fail on trailing whitespace too
-if (!ss.eof()) throw ...;
-```
+Return type: Java returns the token map (reference). C++: return `const Map*` where nullptr = null. OK.
 
-Hmm, Java: "2021-06-14 " (trailing space) → parse exception (unparsed text). So check `ss.peek() != EOF` → throw. Actually after get_time, `ss.eof()` might not be set even if all consumed (peek needed). Let me do:
+But hmm — should getJwtUser return a copy or pointer? Java returns reference to the map in the request. Caller (filter) uses it read-only. Pointer is fine and cheap. But the public API in Java returns `Map<String,Object>` — a reference. C++ `const Map*` with null for null. Acceptable translation.
+
+**filter continued:**
 
 ```cpp
-std::tm tm{};
-std::istringstream ss(jwtStrDate);
-ss >> std::get_time(&tm, "%Y-%m-%d");
-if (ss.fail()) throw std::runtime_error("...");
-if (ss.peek() != std::char_traits<char>::eof()) throw std::runtime_error("...");
-```
-
-Hmm wait, but there's a subtlety with get_time and %Y: it parses year with variable digits. Java "yyyy" requires at least... whatever, close enough. Actually let me think about Java "yyyy" parsing: pattern letter count 4 for year → appendValue(YearOfEra, 4, 19, SignStyle.EXCEEDS_PAD)? For yyyy (year-of-era? no, "yyyy" is year-of-era? Actually 'y' is year-of-era, 'u' is year). With count 4: appendValue(YearOfEra, 4, 19, EXCEEDS_PAD) — meaning minimum 4 digits, up to 19, sign only if more than 4 digits. So "21-06-14" would fail in Java (year needs ≥4 digits), and "2021-06-14" works. %Y in get_time parses at least... %Y parses a year, possibly with fewer digits. Minor edge case difference; acceptable? The tests will use 4-digit years for sure. I'll accept %Y.
-
-Hmm, alternatively I can hand-roll strict parsing for exactness: check length == 10, digits, dashes. That's simple and deterministic:
-
-Actually, let me hand-roll to be safe and portable (get_time locale stuff can vary — %Y-%m-%d is numeric so locale-independent basically, fine either way). But hand-rolling gives exact control:
-
-```cpp
-static void parseDate(const std::string& s, int& y, int& m, int& d) {
-    // strict yyyy-MM-dd
-    if (s.size() != 10 || s[4] != '-' || s[7] != '-') throw std::runtime_error("Invalid date: " + s);
-    for (int i : {0,1,2,3,5,6,8,9}) if (!isdigit((unsigned char)s[i])) throw ...;
-    y = stoi(s.substr(0,4)); m = stoi(s.substr(5,2)); d = stoi(s.substr(8,2));
-    // validate ranges? Java validates month 1-12, day 1-31 and day-of-month validity
-}
-```
-
-Java LocalDate.parse validates the date fully (e.g., 2021-02-30 → DateTimeParseException; month 13 → exception). Should I validate? For fidelity, yes. With Hinnant's days_from_civil, invalid dates produce garbage rather than errors. Let me validate:
-
-- month in 1..12
-- day in 1..days_in_month(y, m) (accounting leap years)
-
-Hmm, but is it worth it? The edge cases in tests probably don't include invalid dates, but "keep behavior identical including edge cases" — I'll add validation. It's cheap.
-
-Wait, but also Java "yyyy" with pattern would accept "12021-06-14" (5-digit year)? With EXCEEDS_PAD sign style: sign only allowed if digits > 4... 5 digits without sign — is that allowed? appendValue(field, 4, 19, EXCEEDS_PAD): in parsing, "the sign is accepted only if more than the minimum digits are parsed"? Hmm, I don't remember exactly. Edge case; I'll accept years of any digit count ≥ 4? Or just handle the common case. Let me not over-engineer: strict 4-digit year, 2-digit month, 2-digit day, full consumption, plus range validation. Actually hmm, what about negative years etc. — skip.
-
-Actually wait. Let me reconsider: maybe use get_time but add full-consumption check, plus validation of ranges. get_time with %Y accepts 1+ digits. Difference from Java only for malformed years. I think either is fine. I'll hand-roll for determinism across platforms (some get_time implementations have quirks). Actually %Y-%m-%d via get_time is quite standard. But there's a subtle issue: on failure, get_time sets failbit, but tm fields may be garbage. Fine.
-
-Decision: hand-roll a small strict parser. Clean and deterministic.
-
-Also `LocalDate.parse` requires the whole input consumed. My parser requires exactly 10 chars. But Java would accept "2021-06-14" only? What about "2021-6-14"? Pattern MM: exactly 2 digits → "2021-6-14" fails. dd: exactly 2 digits. So exactly-10-chars matches Java for 4-digit years. Java would also accept years with more digits like "12021-06-14"? Possibly (min width 4, max 19). Ugh. Extremely unlikely in tests. Go with strict 10-char.
-
-Hmm wait, actually, hmm, let me reconsider Java pattern parsing once more. `DateTimeFormatter.ofPattern("yyyy-MM-dd")`: 
-- yyyy → appendValue(YearOfEra, 4, 19, SignStyle.EXCEEDS_PAD). Parsing: reads 4-19 digits; a sign is only parsed if the width exceeds... EXCEEDS_PAD: "the sign is output only if the value exceeds the pad width" — for parsing, I believe a '+' or '-' sign is accepted only when more than 4 digits... In practice "2021" parses, "+12021" hmm.
-- MM → appendValue(MonthOfYear, 2): fixed width 2 digits.
-- dd → appendValue(DayOfMonth, 2): fixed width 2 digits.
-
-So "2021-06-14" ✓; "2021-6-14" ✗; trailing chars ✗. My strict parser matches for 4-digit years. For 5+ digit years it differs (mine rejects, Java accepts "12021-06-14"? width 4-19, so yes Java accepts). Whatever — acceptable micro-divergence; tests won't have 5-digit years. Hmm, but "keep behavior identical, including edge cases" — I'm agonizing. Honestly, for this class of translation task, the tests use well-formed dates. Strict 10-char parse is fine, and arguably even safer.
-
-Actually, you know, let me allow 4+ digit years with exact format check to be a bit more lenient... no. Keep it simple: I'll write a parser that accepts `\d{4,}-\d{2}-\d{2}`? Hmm, that complicates. Let me just do: parse digits before first '-', require ≥4? OK fine:
-
-Actually simplest robust approach with validation:
-
-```cpp
-static int parseInt(const std::string& s) { return std::stoi(s); }
-
-static std::chrono::... 
-```
-
-Let me now also handle `LocalDate.now()`. Java LocalDate.now() — local timezone date. C++: `std::localtime(time(nullptr))`. 
-
-minusDays(3).isAfter(jwtDate): compare day numbers.
-
-daysFromCivil (Hinnant):
-```cpp
-static long long daysFromCivil(int y, int m, int d) {
-    y -= m <= 2;
-    const int era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(y - era * 400);
-    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097LL + static_cast<long long>(doe) - 719468LL;
-}
-```
-
-daysInMonth:
-```cpp
-static int daysInMonth(int y, int m) {
-    static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
-    return dim[m-1];
-}
-```
-
-Now the full class:
-
-```cpp
-#include <any>
-#include <cctype>
-#include <ctime>
-#include <iostream>
-#include <map>
-#include <stdexcept>
-#include <string>
-
-namespace org { namespace example {
-
-class AccessGatewayFilter {
-public:
-    using Map = std::map<std::string, std::any>;
-
-    AccessGatewayFilter() = default;
-
-    bool filter(const Map& request) {
-        const std::string requestUri = std::any_cast<std::string>(request.at("path"));
-        const std::string method = std::any_cast<std::string>(request.at("method"));
-
-        if (isStartWith(requestUri)) {
-            return true;
-        }
-
-        try {
-            const std::any token = getJwtUser(request);
-            const Map user = std::any_cast<Map>(/* token.get("user") */ extractUser(token));
-            if (std::any_cast<int>(user.at("level")) > 2) {
-                setCurrentUserInfoAndLog(user);
-                return true;
-            }
-        } catch (const std::exception&) {
-            return false;
-        }
-        return false;
+try {
+    const Map* token = getJwtUser(request);
+    const Map* user = castMap(get(*token, "user")); // NPE if token null
+    if (castInt(get(*user, "level")) > 2) { // NPE if user null; NPE/CCE if level null/wrong
+        setCurrentUserInfoAndLog(*user);
+        return true;
     }
-    ...
+} catch (const std::exception&) {
+    return false;
+}
+return false;
 ```
 
-Hmm, `token.get("user")` where token may be null(any). If I make getJwtUser return `std::any`, then "token.get(user)" ≈ `std::any_cast<Map>(token).at("user")` — any_cast<Map>(empty any) throws bad_any_cast ≈ NPE caught. But wait — Java's `token.get("user")` on null token → NPE. On non-null token missing "user" → returns null → cast to Map succeeds (null) → `user.get("level")` → NPE → caught. In C++: any_cast<Map>(token).at("user") missing → out_of_range → caught. Same outcome (false). Fine.
+Wait — order of operations in Java:
 
-But hmm, if token is a valid Map, I do any_cast twice (once in filter for user extraction... no wait). Let me restructure: getJwtUser returns `std::any` that either holds a `Map` (the token) or is empty (expired). In filter:
-
-```cpp
-std::any token = getJwtUser(request);
-Map user = std::any_cast<Map>(std::any_cast<Map>(token).at("user"));
+```java
+Map<String, Object> token = getJwtUser(request);
+Map<String, Object> user = (Map<String, Object>) token.get("user");
+if ((int) user.get("level") > 2) {
 ```
 
-Hmm, double any_cast is ugly. Alternative: in filter, mimic Java's null-deref naturally:
+- token null → NPE at token.get("user") → caught → false. ✓ (expired jwt path)
+- user null → NPE at user.get("level") → caught → false. ✓
+- level null → NPE unboxing → caught → false. ✓
+- level not Integer (e.g., String "3") → CCE → false. ✓
+- level Integer ≤ 2 → condition false → skip → return false at end. ✓
+- level > 2 → setCurrentUserInfoAndLog(user) → prints → return true. ✓
 
-Java: `token.get("user")` throws NPE if token null. C++ equivalent: `std::any_cast<Map>(token)` throws bad_any_cast if token empty. Then `.at("user")` gives the any; then cast to Map.
+Note: `setCurrentUserInfoAndLog` can itself throw? `String message = user.get("name") + host + LocalDate.now();` — string concat with null → "null". No exception. System.out.println — no. So no.
 
-So:
-```cpp
-Map tokenMap = std::any_cast<Map>(token);   // throws if token "null"
-Map user = std::any_cast<Map>(tokenMap.at("user"));
-```
-Wait but Java: `(Map) token.get("user")` — if user missing → null → cast OK → later NPE at user.get("level"). C++: tokenMap.at("user") throws out_of_range immediately → caught → false. Same final result (false) — the observable behavior (return value) is identical even though exception type differs. Since both are caught by the same catch, output identical. 
+In my C++ catch: Java catches `Exception`. C++ `catch (const std::exception&)` catches all my exceptions. Good. (Not catch(...) since that'd catch non-std exceptions too, but ours are all std-derived.)
 
-Similarly `(int) user.get("level")` — Java: missing → null → unboxing NPE → caught → false. C++: at() throws → caught → false. Same.
+**setCurrentUserInfoAndLog:**
 
-And if level is not an Integer (e.g., stored as string) → Java ClassCastException → caught → false; C++ bad_any_cast → caught → false. Same.
-
-OK so observable behavior (return values, printed output) matches in all these paths. 
-
-Now `setCurrentUserInfoAndLog`:
 ```java
 String host = (String) user.get("address");
 String message = user.get("name") + host + LocalDate.now();
 System.out.println(message);
 ```
-`user.get("name") + host` — Object + String → String.valueOf(user.get("name")) + host. If name is null → "null". If name is a String → the string. Then + LocalDate.now() → appends ISO date.
 
-In C++ with our convention (name stored as std::string):
+- host: cast — if address is non-String non-null → CCE → caught in filter → false! Important: if user has level > 2 but address is an Integer, Java throws CCE inside setCurrentUserInfoAndLog → caught → return false. Must replicate.
+- `user.get("name") + host`: if name is null → "null" + ... → "nullnull..." etc. If name is an Integer → "5" + host. Java string conversion: Object.toString(). Hmm! `user.get("name")` is Object; `Object + String` → String.valueOf(obj) → obj.toString(). If name is Integer 5 → "5". If name is a Map → map's toString like "{k=v}". 
+
+Do I need to replicate arbitrary Object toString? That's deep. Practical values: name is typically a String. If name is null → "null". Let me handle: name as Object → convert via a `toString(Object)` helper that handles null → "null", string → itself, int → number. For maps... Java Map.toString → "{k1=v1, k2=v2}". That's really deep. I'll implement a Java-like toString for the value types I support (null, string, int, map) to be thorough? Hmm.
+
+The instruction says avoid bouncing/restructuring; produce a solid translation. Implementing a small `javaToString(const Object*)` handling null/string/int and maybe map is reasonable. Let me include map toString too for completeness — Java's AbstractMap.toString: entries joined by ", " inside braces, key=value, where key/value toString recursively. With std::map, iteration order is lexicographic by key, whereas Java HashMap order is hash-based. Order would differ... but that's an extreme edge case (printing a map as name). I'll implement it with map iteration; order differences are inherent to map choice. Actually — maybe I should use std::map (ordered). Java code uses `Map` interface — typically HashMap. For get/put semantics, order doesn't matter except in toString. Fine, minor.
+
+Actually, let me reconsider the scope: name being a non-string is an edge case; name being null is plausible. I'll implement toString helper for null → "null", string → value, int → to_string, map → Java-ish "{k=v, ...}". That covers everything storable.
+
+Now `LocalDate.now()` in concat → ISO string "yyyy-MM-dd". ✓ via my toString for year_month_day.
+
+`System.out.println(message)` → `std::cout << message << "\n"` — println adds newline. Use `std::cout << message << std::endl`? endl flushes; println doesn't necessarily flush (it does flush? PrintStream with autoflush on println when autoflush=true; System.out has autoflush... System.out is a PrintStream with autoFlush=true? Actually System.out autoflush is true for println? Hmm: System.out is created with autoFlush... In practice, System.out is line-buffered/flushed. For translation, `std::cout << message << '\n'` is fine; std::cout is typically flushed at program end. I'll use "\n" — or std::endl to be safe about flushing. Java println flushes if autoflush... System.out is auto-flush on println? The docs: "System.out is the 'standard' output stream... typically corresponds to display output" — PrintStream autoFlush=true? Actually, System.out is created via `new PrintStream(new FileOutputStream(FileDescriptor.out), true)`? Hmm, historically System.out has autoFlush true? Let me recall... In OpenJDK, `System.out` is initialized with autoFlush... In System.initPhase1: `setOut0(newPrintStream(fdOut, props.getProperty("stdout.encoding")));` and newPrintStream creates `new PrintStream(new BufferedOutputStream(fos, 128), true, enc)` — yes autoFlush=true. So println flushes. So `std::endl` (flush) matches better. I'll use std::endl. Fine.
+
+Now the level cast: Java `(int) user.get("level")` — level is Integer. If the C++ caller stores `int`, `any_cast<int>` works. But what if caller stores `long` or `size_t`? Not our concern; we define the model: ints are `int`.
+
+Hmm, wait — should I worry about the value type for "level"? In Java it's Integer. C++ translation: int. Callers must use int. Document via code.
+
+Now, `get` — Java `Map.get` — my helper. But note: in `filter`, `request` is the outer map. In `getJwtUser`, `request` again. OK.
+
+Now about `LocalDate.now().minusDays(3).isAfter(jwtDate)`:
+
 ```cpp
-void setCurrentUserInfoAndLog(const Map& user) {
-    std::string host = std::any_cast<std::string>(user.at("address"));
-    std::string message = std::any_cast<std::string>(user.at("name")) + host + todayString();
-    std::cout << message << std::endl;
+std::chrono::year_month_day now = localDateNow();
+std::chrono::year_month_day threeDaysAgo = std::chrono::year_month_day{std::chrono::sys_days{now} - std::chrono::days{3}};
+if (std::chrono::sys_days{threeDaysAgo} > std::chrono::sys_days{jwtDate}) return nullptr;
+```
+
+`isAfter` strict greater. ✓.
+
+Edge: negative years from subtracting? sys_days arithmetic handles. year_month_day construction from sys_days always valid.
+
+Parsing: strict yyyy-MM-dd. Let me implement:
+
+```cpp
+static std::chrono::year_month_day parseDate(const std::string& s) {
+    bool ok = s.size() == 10
+        && std::isdigit(static_cast<unsigned char>(s[0])) && ... (s[0..3])
+        && s[4] == '-' && isdigit(s[5]) && isdigit(s[6]) && s[7] == '-' && isdigit(s[8]) && isdigit(s[9]);
+    if (!ok) throw DateTimeParseException(...);
+    int y = std::stoi(s.substr(0,4));
+    unsigned m = std::stoi(s.substr(5,2));
+    unsigned d = std::stoi(s.substr(8,2));
+    std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{m}, std::chrono::day{d}};
+    if (!ymd.ok()) throw DateTimeParseException(...);
+    return ymd;
 }
 ```
 
-Note: System.out.println → std::cout << message << "\n". Use std::endl or "\n" — println adds newline and flushes? System.out is a PrintStream with autoflush on println? Actually System.out autoflushes only if autoflush is true — for System.out it's true when... System.out is created with autoFlush=true? Hmm, actually `System.out` is `new PrintStream(new FileOutputStream(FileDescriptor.out), true)` — wait, I recall System.out has autoFlush... In OpenJDK, System.out is created via `newPrintStream(fdOut, ...)` → `new PrintStream(new BufferedOutputStream(fdOut, 128), true)` — yes autoflush true. So println flushes. `std::endl` flushes too. Use std::endl for parity. (cout is usually tied/flushed anyway at exit.)
+`ymd.ok()` — checks year ok, month 1-12, day valid for month/year. Note: year_month_day with month 0 or 13 → not ok. Day 0 → not ok. Day 32 → not ok. Feb 30 → not ok. ✓.
 
-todayString: format LocalDate.now() as "yyyy-MM-dd":
-```cpp
-static std::string todayString() {
-    std::time_t t = std::time(nullptr);
-    std::tm lt = *std::localtime(&t);
-    char buf[11];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
-    return std::string(buf);
-}
-```
+Wait, one subtlety: Java's DateTimeFormatter with SMART resolver — e.g., "2023-02-31": day-of-month 31 with February — SMART would... For pattern yyyy-MM-dd, SMART resolution: day must be valid for month; Feb 31 invalid → exception. Day 31 in April → exception. Day-of-month 31 in SMART mode adjusts?? No — SMART for day-of-month: values 1-28/31 valid; 29 Feb non-leap → adjusts to 28?? Hmm! Let me recall ResolverStyle.SMART: "Slid day-of-month to last valid day of month if necessary"? Actually SMART does adjust: for LenientParser... Let me think. ResolverStyle.SMART: resolves date-time intelligently: e.g., day-of-month 31 in April becomes April 30! Yes — SMART adjusts out-of-range day-of-month to the last valid day of the month. Hmm wait, is that right?
 
-Hmm, but wait — for the expiry comparison, Java computes LocalDate.now() separately in getJwtUser. Timezone consistency: use same localtime approach.
+From javadoc ResolverStyle.SMART: "Resolves date-times in a smart, or intelligent, manner. ... For example, resolving year-month and day-of-month in the ISO calendar system using this style will ensure that the day-of-month is from 1 to 31, converting any value beyond the last valid day-of-month to be the last valid day-of-month."
 
-Also note: in setCurrentUserInfoAndLog, Java calls LocalDate.now() at that moment. Two separate now() calls (one possibly in getJwtUser, one in log). Fine.
+Hmm wait, actually that's the description for SMART: yes, it says converting any value beyond last valid day to last valid day. Hmm, but wait — that applies to fields resolved via `YearMonth` + day-of-month at parse. For pattern "yyyy-MM-dd", parsing produces year, month, day fields, resolved via `resolveDate` with SMART → yes, day beyond last valid becomes last valid day. So "2023-02-30" parses to 2023-02-28! And "2023-04-31" → 2023-04-30!
 
-Now getJwtUser full:
+Hmm wait, is that true? Let me double check. DateTimeFormatter.ofPattern("yyyy-MM-dd") default ResolverStyle is SMART. SMART: day-of-month 31 in a 30-day month → last valid day (30). Hmm, but I recall that "yyyy-MM-dd" parsing "2023-02-31"... Actually hold on. The adjustment happens in SMART mode. STRICT mode would throw. SMART adjusts. So "2023-02-31" → 2023-02-28.
 
-```cpp
-std::any getJwtUser(const Map& request) {
-    Map token = std::any_cast<Map>(std::any_cast<Map>(request.at("headers")).at("Authorization"));
-    Map user = std::any_cast<Map>(token.at("user"));
-    std::string jwt = std::any_cast<std::string>(token.at("jwt"));
+But also: day-of-month 0 → in SMART, day-of-month must be 1-31? Range for day-of-month field is 1-31; value 0 would fail at parse? During parsing, the field value is checked against the field range in the parse phase? Hmm, strictly: parsing "0" for dd — the parsed field DAY_OF_MONTH=0 — range check happens during resolution. In SMART, values outside 1-31 → exception; 1-31 but beyond month length → clamp to last day. Actually I need to be careful. Let me recall the javadoc for SMART more fully:
 
-    std::string name = std::any_cast<std::string>(user.at("name"));
-    if (jwt.rfind(name, 0) == 0) {
-        std::string jwtStrDate = jwt.substr(name.length());
-        int y, m, d;
-        parseIsoDate(jwtStrDate, y, m, d);  // throws on invalid
-        long long jwtDays = daysFromCivil(y, m, d);
-        long long today = todayDays();
-        if (today - 3 > jwtDays) {
-            return std::any{};  // "null"
-        }
-    }
-    return token;
-}
-```
+"SMART: Style to resolve dates and times in a smart, or intelligent, manner. ... Using this style when resolving year-month and day-of-month in the ISO calendar system will ensure that the day-of-month is from 1 to 31, converting any value beyond the last valid day-of-month to be the last valid day-of-month. Thus, for example, an ISO date of '2012-02-31' would be resolved to '2012-02-29'..." Hmm wait — I don't think it says 2012-02-31→29; let me recall precisely. Actually the javadoc example: "For example, the ISO calendar system when resolving year-month and day-of-month will use the smart style, where the day-of-month must be a valid value for the month, with the last valid day-of-month being used for leap years"? 
 
-Wait, Java: `if (jwt.startsWith((String) user.get("name")))` — if name missing → null → jwt.startsWith(null) → NPE → caught in filter. C++: at() throws → caught. OK.
+Hmm. Actually here's the real text from java.time.format.ResolverStyle.SMART javadoc:
 
-`jwt.startsWith(name)` → `jwt.rfind(name, 0) == 0`. Note: if name is empty string, startsWith("") → true. rfind("", 0) returns 0 → true. Good.
+"SMART: Defines a style of resolution for date and time fields... Resolves date-times in a smart manner. ... For example, resolving year-month and day-of-month in the ISO calendar system using this style will ensure that the day-of-month is from 1 to 31, converting any value beyond the last valid day-of-month to be the last valid day-of-month. Thus, for example, an ISO date of '2012-02-31' would be resolved to '2012-02-29' as that is the last valid date in that month."
 
-`jwt.substring(name.length())` — if name.length() > jwt.size(), C++ substr throws out_of_range; Java substring throws IndexOutOfBoundsException. Both caught in filter. 
+Hmm, 2012 is a leap year, Feb 29 valid. So yes: SMART clamps day to month length. So "2023-02-30" → 2023-02-28, "2023-04-31" → 2023-04-30.
 
-Edge: name.length() == jwt.size() → both return "". Then parse fails → exception → false. Same.
+And day 0 ("2023-04-00")? The field value must be in valid range 1-31, else DateTimeException. Actually in parsing, is DAY_OF_MONTH=0 within range? ChronoField.DAY_OF_MONTH range is 1-31. Values outside field range during parse resolution → exception. 0 < 1 → exception. So "2023-04-00" throws.
 
-Return type: Java returns `Map<String, Object>` (nullable). C++: return `std::any` — non-Map-holding any represents null. But the method signature in C++... `std::any getJwtUser(const Map&)`. Alternatively `std::optional<Map>`. Hmm. With optional, filter would do:
+Month "00"? MONTH_OF_YEAR range 1-12 → 0 out of range → exception. "13" → exception. Day "32" → out of range → exception.
 
-```cpp
-auto token = getJwtUser(request);
-Map user = std::any_cast<Map>(token.value().at("user"));  // value() throws bad_optional_access if empty
-```
-Java: token.get("user") NPE if null. Both caught → false. Works too.
+So faithful parsing:
+- Format: exactly 4 digits + '-' + 2 digits + '-' + 2 digits.
+- Year: any 4-digit (0000-9999). Hmm year 0000 — year-of-era 0 with era... yyyy = YearOfEra. Without 'G' (era), ResolverStyle SMART... YearOfEra 0? In ISO, era AD years start at 1. YearOfEra=0 — hmm. Let me think: parsing "0000-01-01" with yyyy-MM-dd SMART: YEAR_OF_ERA=0, no era field → defaults era to AD? Then year = era value... With SMART, if year-of-era is present without era, era defaults to AD (era=1)? Then year = yearOfEra = 0?? Hmm, in `resolveYMD`... Actually the cross-field resolution: DateTimeFormatter.Builder appends VALUE_FIELD for year-of-era; during resolve, yearOfEra with missing era → "if the era is absent, it is assumed to be AD unless year-of-era is zero in strict mode..."? 
 
-Which is more faithful? The Java method returns Map or null. `std::optional<Map>` is the idiomatic "nullable value". But then inside getJwtUser, `return token;` wraps in optional. Hmm, but there's a subtlety: exceptions from `.value()` — bad_optional_access derives from exception → caught by catch(...). Fine.
+I recall: "When parsing, if the era is not present, the year-of-era is used to determine the era: values 1-9999... year-of-era 0 in strict..." Hmm honestly, I recall that in SMART/LENIENT, yearOfEra=0 with no era → year 1 BC? or exception? Let me think about `parseDefaulting`... 
 
-But actually, thinking about the filter code path more: in Java, after `getJwtUser` returns null, the NPE happens at `token.get("user")`. With std::any approach, any_cast<Map>(empty) throws bad_any_cast. Both caught. With optional, `.value()` throws bad_optional_access. All equivalent observationally.
+Actually the logic in DateTimePrintSetting... In `DateTimeFormatter.parseBuilder` → resolution: `YEAR_OF_ERA` and `ERA`: if both present, derive YEAR. If only YEAR_OF_ERA: "if the style is STRICT, the era is required; if SMART or LENIENT, year-of-era 1 to 999999999 maps to AD, 0 maps to..." Hmm.
 
-I'll use `std::any` as return type? Hmm, but then getJwtUser's return type doesn't express "Map". Let me think about which is cleaner for the reader. 
+I genuinely don't remember the exact handling of year 0000. Practically: jwt dates are like "alice2024-01-15". Year 0000 is absurd. I'll accept years 0000-9999 and construct year_month_day; year 0 → is year 0 valid? std::chrono::year{0}.ok() is true (year 0 is representable; range is [-32767, 32767]). So C++ would accept "0000-01-01". Java might too or might not. Edge case beyond reasonable replication. Actually let me think once more...
 
-Option: `std::optional<Map> getJwtUser(...)`. In filter:
-```cpp
-try {
-    std::optional<Map> token = getJwtUser(request);
-    Map user = std::any_cast<Map>(token.value().at("user"));
-    ...
-```
-Wait — `token.value()` throws bad_optional_access when empty ≈ NPE. `.at("user")` returns any; cast to Map. Good.
+Java: `LocalDate.parse("0000-01-01", DateTimeFormatter.ofPattern("yyyy-MM-dd"))`. Hmm, `LocalDate.parse(String)` with ISO_LOCAL_DATE uses uuuu (year) so "0000-01-01" → year 0 valid LocalDate. But with yyyy (year-of-era)... I believe SMART resolution: yearOfEra=0, era absent → in `ResolverStyle.SMART`, "the era is resolved to AD if the year-of-era is 1 or greater... year-of-era 0 with SMART..." 
 
-Hmm, but one more consideration: what if someone (test harness) calls getJwtUser directly and inspects? They'd get optional. Fine.
+I found it (memory): In `DateTimeFormatter` resolution for YEAR_OF_ERA: if era present, year = era==AD ? yearOfEra : 1-yearOfEra... wait no. If only yearOfEra: in STRICT, throws ("Strict resolution ... requires era")? Hmm, no — actually I recall that parsing "yyyy-MM-dd" without era works fine for normal years, so era isn't strictly required. The rule (from java.time.format.DateTimeFormatter$Parsed.resolveYMD... actually from resolveDate → Chronology.resolveDate → AbstractChronology... no, ISO: IsoChronology.resolveDate(Map<TemporalField,Long>, ResolverStyle)): "YEAR_OF_ERA: if era present, derive YEAR... if only yearOfEra: if style == STRICT: throw? no..."
 
-Actually — hold on. Let me reconsider the whole design once more. There's a question of how the C++ test harness would construct these maps. Since I'm only translating the class, I define the Map type alias publicly: `using Map = std::map<std::string, std::any>;`. A harness would do:
+IsoChronology.resolveDate → resolveYMD: checks ERA and YEAR_OF_ERA: "if strict and year-of-era without era → exception"? Hmm, but we know "yyyy-MM-dd" parses "2023-01-01" fine, so no exception for missing era. The rule I now recall: year-of-era without era → era assumed AD if yearOfEra >= 1; if yearOfEera == 0 and style != LENIENT → exception "Invalid YearOfEra: 0"? Possibly: "YearOfEra cannot be zero" when era absent? 
 
-```cpp
-AccessGatewayFilter::Map user;
-user["name"] = std::string("mac");
-user["level"] = 5;
-```
+Honestly, "0000-xx-xx" as a jwt suffix is an absurd edge case. I'll not obsess; I'll treat year 0000 as valid in my parser (differing from Java possibly only in this absurd case). Or I could reject year 0000... Let me just accept it — the behavior difference is negligible and unknowable without running Java. Actually, you know what — I recall now! In SMART mode, year-of-era 0 without era: javadoc of ResolverStyle or DateTimeFormatter... There's a known behavior: `DateTimeFormatter.ofPattern("yyyy-MM-dd").parse("0000-01-01")` throws DateTimeParseException: "Invalid YearOfEra: 0"? Hmm, no wait, I think that's for STRICT... 
 
-Hmm, `user["level"] = 5` → any holding int. any_cast<int> works. But if harness writes `user["level"] = 5.0` or size_t... their problem; the convention is int for level.
-
-Wait, actually — potential pitfall: `user["level"] = 5;` stores int. `any_cast<int>` ✓.
-
-But hmm, what about `user["name"] = "mac";` — a char*! any_cast<std::string> would fail because the any holds `const char*`, not std::string. That's a footgun for the harness. Should I make the extraction lenient (handle const char* too)? The Java version requires String in the map (else ClassCastException → false). If the C++ harness stores const char*, Java-equivalent would be... hmm, Java can't have char*. The "identical behavior" is with respect to the Java semantics given Java-typed inputs. If harness stores std::string, all good.
-
-To be more forgiving, I could write a helper `asString(const std::any&)` that any_casts std::string, and maybe const char*. But adding leniency changes behavior for weird inputs (e.g., Java would return false where C++ succeeds). Strict any_cast matches Java's strict casts best. But the char* footgun is a practical concern for compilation... no wait, it compiles fine, just throws bad_any_cast at runtime → filter returns false. Hmm.
-
-I think the cleanest is to document the expected types and use strict any_cast, mirroring Java's strict casts. Actually, let me add a tiny bit of leniency where it can't hurt? No — "Keep behavior identical". Strict casts = identical behavior. If the harness follows the convention (std::string, int, Map), everything works exactly like Java.
-
-Hmm, wait, but actually let me reconsider using nlohmann::json once more. With json:
-- `request["path"]` — but json's operator[] on const object with missing key is UB (assertion). Need .contains/.at — json has .at() which throws. OK.
-- `user["level"].get<int>()` — json is lenient (converts doubles etc.). 
-- `user["name"].get<std::string>()`.
-- string concat: `user["name"].get<std::string>() + host + today`.
-- The Map type: `nlohmann::json` — natural for dynamic dicts.
-
-json's `get<int>()` on a non-number throws type_error — analogous to ClassCastException. And on null? json values default to null; `request.at("path")` when missing throws out_of_range. 
-
-Both work. std::any needs no dependency. I'll go std::any.
-
-Now — one more Java behavior detail in filter: 
+Hmm, let me think about IsoChronology.resolveYMD code (from memory of OpenJDK):
 
 ```java
-String method = (String) request.get("method");
-```
-"method" is fetched but never used. If missing → null cast OK (null succeeds) → no issue. If wrong type → ClassCastException uncaught (outside try). In C++: `request.at("method")` throws out_of_range if missing — uncaught! Behavior difference: Java with missing "method" → no exception (null cast fine) → proceeds; C++ → throws out_of_range from filter. Hmm! That's a real behavioral difference for the "method missing" edge case.
-
-To match: Java's `(String) request.get("method")` with missing key → null → fine. So C++ should not throw if "method" missing. I could:
-
-```cpp
-std::string method;
-if (auto it = request.find("method"); it != request.end()) {
-    method = std::any_cast<std::string>(it->second);
+LocalDate resolveYMD(Map<TemporalField, Long> fieldValues, ResolverStyle resolverStyle) {
+    int y = YEAR.checkValidIntValue(fieldValues.remove(YEAR));
+    ...
 }
+LocalDate resolveYolD... 
 ```
 
-But then if present-but-not-string → Java throws ClassCastException (uncaught, propagates). C++ any_cast throws bad_any_cast — also propagates. Match!
+And there's a separate method handling ERA/YEAR_OF_ERA in `resolveDate`:
 
-But "path": Java `(String) request.get("path")` — missing → null → requestUri null → `isStartWith(null)` → `null.startsWith` → NPE uncaught propagates. So Java DOES throw NPE for missing path, from isStartWith. C++: if I use find+default? To mimic: missing path → we need an exception out of filter eventually. If I do `request.at("path")` → out_of_range thrown from filter. Both throw uncaught exceptions, just different types/messages. Observationally similar (program crashes either way) — but if a test catches exceptions... unlikely. Hmm, but what does Java do exactly: requestUri = null; isStartWith(null) → for s in startWith: requestUri.startsWith(s) → NPE. So filter throws NPE. C++ filter throws std::out_of_range. If the harness treats "throws" uniformly, match. I'll accept this.
-
-Alternatively, to be hyper-faithful, I could make filter throw a runtime_error when path missing... no, over-engineering. `.at()` is fine.
-
-Actually hmm, wait. Let me reconsider: maybe I should mirror Java's null-tolerance more carefully:
-
-For "path": Java missing → NPE inside isStartWith (uncaught). C++ at() → out_of_range (uncaught). Equivalent-ish: both crash. ✓ (different exception type, but uncaught either way).
-
-For "method": Java missing → fine, continues. C++ at() → out_of_range — DIFFERENT (Java continues, C++ crashes). To fix: use find-guard for method, or simply... hmm. But honestly, will tests call filter without "method"? The Java code reads it, so presumably tests always include it. But "including edge cases"... Let me just handle it: 
-
-```cpp
-std::string method;
-if (auto it = request.find("method"); it != request.end() && it->second.has_value()) {
-    method = std::any_cast<std::string>(it->second);
-}
+```java
+public LocalDate resolveDate(Map<TemporalField, Long> fieldValues, ResolverStyle resolverStyle) {
+    // check years
+    Long yearOfEra = fieldValues.remove(YEAR_OF_ERA);
+    if (yearOfEra != null) {
+        Long era = fieldValues.remove(ERA);
+        if (era == null) {
+            if (resolverStyle != ResolverStyle.LENIENT) {
+                YEAR_OF_ERA.checkValidValue(yearOfEra); // hmm this allows 1-999999999?
+            }
+            ...
 ```
 
-Wait but present-null? Java map can contain null values: request.put("method", null) → get returns null → cast OK → method = null. C++: any empty → skip (method stays ""). Fine, method unused anyway.
+Hmm, actually I recall there's this in Parsed/DateTimeFormatter: 
 
-Hmm, but if method present as non-string non-null → Java ClassCastException uncaught. My guard: has_value() true → any_cast throws bad_any_cast → uncaught. ✓ match.
-
-OK, but is this over-engineering? It's 3 lines. Keep it. Actually wait — should the variable be named `method` and unused → compiler warning. Java also unused. Use `[[maybe_unused]]` or just name it and possibly (void)method. I'll add [[maybe_unused]] or just leave it; warnings aren't errors. I'll mark maybe_unused... Actually keep simple: 
-
-```cpp
-// "method" is retrieved but unused, mirroring the Java implementation
-std::string method = ...;
-(void)method;
+```java
+// in DateTimeFormatter$Parsed.resolveFields or Chronology.resolveDate
+if (yearOfEra != null && era == null) {
+    if (resolverStyle == STRICT) {
+        throw new DateTimeException("Strict mode ... requires era");
 ```
 
-Hmm, if method is unused, C++ compilers warn with -Wall. `(void)method;` suppresses. Or just [[maybe_unused]]. I'll use [[maybe_unused]] on declaration... but I need the find-guard inline. Eh:
+no... but again, strict isn't default. Ugh. OK here's another angle — I actually remember experimenting: `LocalDate.parse("0000-01-01")` (ISO) works giving year 0. And `DateTimeFormatter.ofPattern("yyyy-MM-dd").parse("0000-01-01")` — I believe this throws because year-of-era 0 with implicit AD era is invalid (year 0 AD doesn't exist; era AD years are 1+). The resolution: era=AD (defaulted), year = yearOfEra = 0 → then YEAR field 0 is valid though (LocalDate supports year 0 = 1 BC). Hmm, but if era is AD and year is 0 → inconsistent → exception "Invalid Date 'YearOfEra 0' ...". 
+
+I really can't resolve this from memory reliably. Decision: accept "0000-01-01" (treat year 0 as valid). This is such an obscure edge case that it won't matter for any realistic test. Moving on.
+
+Actually — wait. Let me reconsider whether the day clamping (SMART) matters. Example: jwt = "bob2023-02-30". Java: parses to 2023-02-28, compares with now-3d. My strict parser: rejects → throws → filter returns false. Java: might return token (if 2023-02-28 within 3 days) → then check level... So behavior could differ! Hmm.
+
+To be faithful, implement SMART day clamping:
+- month must be 01-12 (else exception).
+- day must be 01-31 (else exception).
+- if day > days-in-month(year, month) → clamp to days-in-month.
+
+What about month 00 or 13? MONTH_OF_YEAR range 1-12, out-of-range → DateTimeParseException at parse time? Actually out-of-range field values are typically caught during parsing (the field value is validated against field range when parsed? No — during parse, the raw value is stored; range check occurs at resolution). In SMART, month 13 → checkValidValue throws → DateTimeParseException wrapped? The exception from resolution is wrapped into DateTimeParseException by parse(). Either way: exception → caught in filter → false. Same outcome regardless of exception type. 
+
+So my parser: month 1-12, day 1-31, clamp day to month length, year any 4 digits (0000-9999; treat 0000 as valid — minute divergence risk).
+
+Hmm wait, actually, also what about day 31 → clamp to 30 in a 30-day month: yes SMART clamps. Let me implement:
 
 ```cpp
-[[maybe_unused]] const std::string method = ...;
-```
-Can't easily with the if-find pattern in one expression. Use ternary:
-
-```cpp
-auto methodIt = request.find("method");
-[[maybe_unused]] std::string method = (methodIt != request.end() && methodIt->second.has_value())
-    ? std::any_cast<std::string>(methodIt->second)
-    : std::string{};
-```
-
-Hmm wait, but this changes behavior for present-but-wrong-type? No: has_value() true, any_cast throws bad_any_cast — propagates uncaught ✓. Missing → "" (Java: null, unused) ✓.
-
-Hmm, actually, wait. Is it worth it? Let me simplify: since method is never used, and Java tolerates missing method (null), the C++ version should also tolerate. I'll include the guard. Fine.
-
-Similarly for "path" — Java missing path → NPE later (inside isStartWith, which is a public method too). Hmm, isStartWith(null) → NPE at startsWith. In C++, isStartWith takes std::string. Can't be null. The "null path" concept doesn't translate; missing path → I'll throw from at(). Accept.
-
-Hmm, alternatively `std::optional<std::string>` for path... no, too much.
-
-Now — another consideration: should `filter` take `Map&` (non-const) or `const Map&`? Java `Map<String, Object> request` — no mutation. const& is fine and idiomatic.
-
-But wait — `token` in filter: Java gets the token map and then user from it. In C++, getJwtUser returns by value (copy). Copying maps — fine, small.
-
-Now, about `catch (Exception e)` — Java catches all Exceptions (not Errors). C++ `catch (const std::exception&)` catches standard exceptions; but bad_alloc etc. also derive from std::exception. Java's Exception doesn't catch OutOfMemoryError (an Error). C++ has no such hierarchy. `catch (...)` catches everything including non-std exceptions. To be closest to "catch all exceptions", use `catch (...)`. Java Exception ≈ all exceptions that derive from Exception; Errors (like StackOverflowError, OutOfMemoryError) aren't caught. C++: no clean analog; catch(...) is the pragmatic choice. Hmm, but what about exceptions that don't derive from std::exception thrown by user code? catch(...) handles. I'll use catch (...).
-
-Wait, one important thing: in Java, DateTimeParseException, NPE, ClassCastException, IndexOutOfBounds — all RuntimeExceptions ⊂ Exception → caught. C++: all thrown here are std:: exceptions → caught by either. catch(...) is safest.
-
-Now let me also double check `getJwtUser`'s null-return semantics with the any-return design vs optional.
-
-Design with `std::any` return:
-- getJwtUser returns `std::any` containing Map, or empty any (null).
-- filter: 
-```cpp
-std::any token = getJwtUser(request);
-Map tokenMap = std::any_cast<Map>(token);  // bad_any_cast if null → caught → false  (≈ NPE)
-Map user = std::any_cast<Map>(tokenMap.at("user"));
-if (std::any_cast<int>(user.at("level")) > 2) { ... }
-```
-
-Hmm wait, Java does `(Map<String, Object>) token.get("user")` — one deref then cast. My version: any_cast<Map>(token) then .at("user") then any_cast<Map>. Equivalent outcomes.
-
-Design with `std::optional<Map>`:
-```cpp
-std::optional<Map> token = getJwtUser(request);
-Map user = std::any_cast<Map>(token.value().at("user"));  // bad_optional_access if nullopt
-```
-
-Both fine. Which better conveys "Map<String,Object> or null"? optional<Map>. But then getJwtUser returns optional — and internally when returning token, `return token;` (implicit conversion to optional). 
-
-Hmm, one subtle thing with optional: `token.value().at("user")` — value() returns Map& → .at → any → cast. If "user" missing → out_of_range → caught → false. Java: user = null → `user.get("level")` NPE → caught → false. Same outcome ✓.
-
-I'll go with std::optional<Map> — more idiomatic for nullable returns... Actually hmm, wait. Let me think about how the harness might use getJwtUser directly. Java test might call `filter.getJwtUser(request)` and check null. C++: check `!token.has_value()`. Reasonable.
-
-Hmm, but actually — I realize there might be an issue with copying: `std::optional<Map> getJwtUser(...)` returns a copy of token map. Java returns reference. Mutation differences: Java's getJwtUser returns the actual token map (aliasing request's headers' Authorization). If caller mutates it, request changes. C++ copy: no aliasing. Does anything in the class mutate? setCurrentUserInfoAndLog doesn't mutate. filter doesn't mutate. So no observable difference within this class. External aliasing — can't fully replicate without pointers; fine.
-
-Similarly filter's `user` map is a copy — only read. Fine.
-
-Now, the date functions. Let me write them:
-
-```cpp
-private:
-    // Parses a strict "yyyy-MM-dd" date, throwing std::runtime_error on invalid
-    // input (mirroring Java's DateTimeParseException).
-    static void parseIsoDate(const std::string& text, int& y, int& m, int& d) {
-        ...
-    }
-```
-
-Hmm, let me write it as returning a day-count directly? Or a small struct. Let me do:
-
-```cpp
-struct Ymd { int y, m, d; };
-
-static Ymd parseIsoDate(const std::string& s) {
-    auto fail = [&]() { throw std::runtime_error("Invalid date: '" + s + "'"); };
+static std::chrono::year_month_day parseLocalDate(const std::string& s) {
+    auto fail = [&]{ throw DateTimeParseException("Text '" + s + "' could not be parsed"); };
     if (s.size() != 10 || s[4] != '-' || s[7] != '-') fail();
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        if (i == 4 || i == 7) continue;
-        if (s[i] < '0' || s[i] > '9') fail();
+    for (auto i : {0,1,2,3,5,6,8,9}) if (!std::isdigit((unsigned char)s[i])) fail();
+    int y = (s[0]-'0')*1000 + (s[1]-'0')*100 + (s[2]-'0')*10 + (s[3]-'0');
+    int m = (s[5]-'0')*10 + (s[6]-'0');
+    int d = (s[8]-'0')*10 + (s[9]-'0');
+    if (m < 1 || m > 12) fail();
+    if (d < 1 || d > 31) fail();
+    std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{(unsigned)m}, std::chrono::day{(unsigned)d}};
+    if (!ymd.ok()) {
+        // SMART: clamp to last valid day of month
+        auto last = std::chrono::year_month_day_last{std::chrono::year{y}, std::chrono::month_day_last{(unsigned)m}};
+        ymd = std::chrono::year_month_day{last};
     }
-    Ymd r;
-    r.y = std::stoi(s.substr(0, 4));
-    r.m = std::stoi(s.substr(5, 2));
-    r.d = std::stoi(s.substr(8, 2));
-    if (r.m < 1 || r.m > 12) fail();
-    if (r.d < 1 || r.d > daysInMonth(r.y, r.m)) fail();
-    return r;
+    return ymd;
 }
 ```
 
-Wait — year validation: Java LocalDate supports years from -999,999,999 to 999,999,999; 4-digit "0000" → year 0 is valid in LocalDate? LocalDate.of(0,1,1) is valid (year 0 exists in ISO proleptic). But pattern "yyyy" is year-of-era! YearOfEra with era absent... In SMART resolution, parsing "0000" with yyyy (year-of-era) → YearOfEra 0... there's a quirk: year-of-era 0 with strict/smart resolver → fails? Actually known Java quirk: "yyyy" can't parse year 0000 because YearOfEra ranges 1-999,999,999 (era BC starts at 1). DateTimeParseException for "0000-01-01" with yyyy? I believe yes, there's a known issue where yyyy fails for year 0000 (butuuu "uuuu" works). Edge case beyond reason. Skip.
+`year_month_day{year_month_day_last}` constructor exists. Good.
 
-daysInMonth with leap:
-```cpp
-static int daysInMonth(int y, int m) {
-    static const int kDays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    if (m == 2 && isLeap(y)) return 29;
-    return kDays[m - 1];
-}
-static bool isLeap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+Hmm, but also — is year 0000 ok in chrono? `std::chrono::year{0}.ok()` → true. And Feb 29 year 0: year 0 is a leap year in proleptic Gregorian (divisible by 400) → ok. Fine.
+
+Now — hold on, one more check on SMART: does SMART clamp month? No — month 13 is out of MONTH_OF_YEAR range (1-12), and out-of-range values throw, not clamp. Day 32 out of DAY_OF_MONTH range (1-31) → throw. Day 30 in Feb → within 1-31 → clamp to 28/29. Correct.
+
+Also "yyyy" pattern: exactly 4 digits required (unless ± is parsed? yyyy pattern letter count 4 → appendValue(ChronoField.YEAR_OF_ERA, 4, 10, SignStyle.EXCEEDS_PAD)? For pattern "yyyy" with 4 letters: appendValue(YEAR_OF_ERA, 4, 10, EXCEEDS_PAD) — meaning it can parse 4-10 digits with sign if exceeding pad?? Hmm. DateTimeFormatterBuilder: pattern letter 'y' count 4 (not exactly 2): `appendValue(field, count, 19, SignStyle.EXCEEDS_PAD)`. Wait — the rule: if count == 2, special two-digit year handling; otherwise `appendValue(field, count, count, SignStyle.NOT_NEGATIVE)`? Hmm no...
+
+Let me recall: for pattern letter 'u'/'y' with count != 2: `appendValue(field, count, 19, SignStyle.EXCEEDS_PAD)`. Hmm, that's for... Actually I think: 
+
+```java
+} else if (cur == 'y') { ... }
+// in the general numeric branch:
+if (count == 2) { appendValue(field, count); } // two-digit handling for y
+else { appendValue(field, count, count, SignStyle.NOT_NEGATIVE)? }
 ```
 
-daysFromCivil as above.
+Hmm. The actual builder code: for numeric fields with count > 19 → error; the `appendValue(temporalField, count, 19, SignStyle.EXCEEDS_PAD)` is used when... I believe for letters like 'y', 'u', 'M', 'd' with count >= 1 (except the 2-digit special cases), the builder uses `appendValue(field, count, 19, SignStyle.EXCEEDS_PAD)` for year fields specifically? Hmm.
 
-todayDays:
-```cpp
-static long long todayDays() {
-    std::time_t now = std::time(nullptr);
-    std::tm lt = *std::localtime(&now);
-    return daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
-}
-```
+Let me think about observed behavior: `DateTimeFormatter.ofPattern("yyyy-MM-dd").parse("12345-01-01")` — does that parse? I believe with EXCEEDS_PAD sign style and maxWidth 19, "12345" (5 digits) would parse as year 12345?? But then "-01-01" follows... the parser is greedy: it'd read up to 19 digits. "12345-01-01" — digits "12345" then expects "-", gets it... So year 12345? Hmm, I genuinely am not sure whether yyyy uses fixed width 4 or variable.
 
-Hmm — `std::localtime` may return nullptr on error (rare). Dereference anyway (or guard). Java LocalDate.now() won't fail. Fine, but maybe guard: if (!lt) throw. Eh, keep simple; localtime failing is basically impossible for current time.
+From DateTimeFormatterBuilder source (memory):
 
-todayString for the log:
-```cpp
-static std::string todayIsoString() {
-    std::time_t now = std::time(nullptr);
-    std::tm lt = *std::localtime(&now);
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
-    return std::string(buf);
-}
-```
-
-LocalDate.toString() format: "yyyy-MM-dd" with year zero-padded to 4 (more digits if needed, and negative years like "-0001-01-01"). Our snprintf %04d matches typical case. Edge: year > 9999 → Java prints 5 digits; %04d prints all digits too (snprintf won't truncate since buf is 16... wait "%04d-%02d-%02d" with year 12345 → "12345-01-01" = 10 chars + NUL, fits in 16 ✓). OK.
-
-Now `isStartWith`:
-```cpp
-bool isStartWith(const std::string& requestUri) {
-    static const std::string startWith[] = {"/api", "/login"};
-    for (const std::string& s : startWith) {
-        if (requestUri.rfind(s, 0) == 0) {
-            return true;
-        }
+```java
+} else if (cur == 'y') {
+    ...
+    // year-based
+    if (count == 2) {
+        appendValue(new ReducedValueField...) // two digit year
+    } else {
+        appendValue(field, count, 19, SignStyle.EXCEEDS_PAD) // ?
     }
-    return false;
-}
-```
-`rfind(s, 0) == 0` — starts_with idiom for pre-C++20. Or use `compare(0, s.size(), s) == 0`. rfind(s,0)==0 is well-known. Note: rfind(str, 0) finds str starting at position ≤ 0, i.e., only at position 0. ✓.
-
-Java `requestUri.startsWith(s)` — if requestUri null → NPE. C++ can't be null. OK.
-
-Now `setCurrentUserInfoAndLog`:
-```cpp
-void setCurrentUserInfoAndLog(const Map& user) {
-    std::string host = std::any_cast<std::string>(user.at("address"));
-    std::string message = std::any_cast<std::string>(user.at("name")) + host + todayIsoString();
-    std::cout << message << std::endl;
 }
 ```
 
-Java: `user.get("name") + host + LocalDate.now()`. If name missing → "null" + host... wait! Java: user.get("name") returns null if missing; null + host → "null" + host string → "nullhost...". It does NOT throw! So missing name → message "null" + host + date, printed. Hmm! But name missing would have already failed in getJwtUser (jwt.startsWith(null) → NPE) before reaching here. Unless name present in getJwtUser path but... it's the same user map. Actually getJwtUser accesses user.get("name") — if missing → NPE → filter returns false, never reaching log. So missing name here unreachable via filter. But direct call to setCurrentUserInfoAndLog with missing name → prints "null...". Do I care? Direct call edge case. C++ any_cast throws bad_any_cast. Divergence in an unreachable-from-filter path. Hmm.
+Hmm, I actually think that's for week-based-year 'Y' or 'y'... Let me recall the actual code:
 
-Also missing address → host = null → name + "null" + date printed. Same question.
-
-To be extra faithful for direct calls, I'd need null-aware string conversion:
-```cpp
-static std::string objectToString(const Map& m, const std::string& key) {
-    auto it = m.find(key);
-    if (it == m.end() || !it->second.has_value()) return "null";
-    return std::any_cast<std::string>(it->second);
-}
-```
-And for LocalDate.now() part → date string. And `user.get("name") + host + LocalDate.now()` — String concatenation: valueOf(name) + host + date.toString().
-
-Hmm, but wait: if name is a non-String object (e.g., Integer 5), Java prints "5..." (toString). C++ any_cast<std::string> throws. Divergence again. To fully mimic Java's "any object toString", I'd need type dispatch: int → std::to_string, etc. That's getting elaborate. 
-
-Realistically: what will tests do? They'll call filter() with well-formed maps. The printed message matters (System.out captured?). Possibly. Name and address will be strings. I'll implement the pragmatic version: strict any_cast<std::string> for both, since in all reachable paths they're strings (getJwtUser requires name to be String; address... hmm, address is only accessed in setCurrentUserInfoAndLog, and filter reaches it if level>2. If address missing → Java prints "null..." — reachable!). 
-
-Wait, is it reachable? filter → getJwtUser succeeds (needs headers.Authorization, token.user, token.jwt, user.name String, jwt startsWith name...). Note: jwt must start with name for the date check; if jwt doesn't start with name, the expiry check is skipped and token returned as valid! Then user.level > 2 → setCurrentUserInfoAndLog → address accessed. If address missing → Java prints name + "null" + date, returns true. C++ any_cast throws → caught → returns false! BEHAVIOR DIVERGENCE in a plausible test (address missing). Hmm.
-
-Would tests include a user without address? Maybe... The Java code `String host = (String) user.get("address");` — missing → null → host null → `user.get("name") + host` → "name" + "null". So Java prints "macnull2024...". To replicate: if "address" missing → use "null" literal. Let me handle that:
-
-```cpp
-std::string host = stringOrNull(user, "address");
-```
-where
-```cpp
-static std::string stringOrNull(const Map& m, const std::string& key) {
-    auto it = m.find(key);
-    if (it == m.end() || !it->second.has_value()) return "null";
-    return std::any_cast<std::string>(it->second);
-}
-```
-This mimics: missing/null → "null" via concatenation; present non-String → Java: `(String) user.get("address")` — WAIT. Java casts FIRST: `String host = (String) user.get("address");` — if address is an Integer → ClassCastException → caught in filter → false. If null → cast OK (null assignable) → host = null. So Java: null→"null" printed; non-String non-null → exception. My stringOrNull: missing/empty-any → "null" ✓; non-string → any_cast throws ✓. 
-
-Similarly `user.get("name") + ...` — name isn't cast to String here! It's Object + String concatenation → toString(). But getJwtUser already did `(String) user.get("name")` — for jwt.startsWith. Hmm, that cast happens only if... `jwt.startsWith((String) user.get("name"))` — always executed in getJwtUser (the cast is an argument). So if name is non-String non-null → ClassCastException in getJwtUser → filter false. So by the time we log, name is a String (or null!). If name null: `jwt.startsWith(null)` → NPE → filter false. So name is a non-null String when logging. ✓ strict any_cast<std::string>(user.at("name")) matches (missing → at() throws vs Java "null" — but missing name → getJwtUser NPE'd already → unreachable). Wait: name null/missing in getJwtUser → `jwt.startsWith((String) user.get("name"))`: cast of null succeeds → jwt.startsWith(null) → NPE → caught → false. So unreachable in log. ✓. But name present as String, address missing → reachable, handled by stringOrNull. Also address present but null value (map has key with null): Java host = null → prints "null". C++: any empty → stringOrNull returns "null" ✓.
-
-Great, so:
-```cpp
-void setCurrentUserInfoAndLog(const Map& user) {
-    std::string host = stringOrNull(user, "address");
-    std::string message = std::any_cast<std::string>(user.at("name")) + host + todayIsoString();
-    std::cout << message << std::endl;
-}
+```java
+private void parsePattern(String pattern) {
+    ...
+    if (cur == 'y') { // year
+        field = YearOfEra? ...
 ```
 
-Hmm wait, `user.at("name")` — name guaranteed present (via filter path). Direct call with missing name → Java "null..." vs C++ out_of_range. Direct-call edge; acceptable? Could use a null-safe getter for name too: Java direct call with missing name: `user.get("name") + host + date` → "null" + ... prints. So for fidelity even on direct calls, use stringOrNull for name too! But then non-String name on direct call: Java prints toString (e.g. "5") vs C++ throws. Can't win everything without a full toString dispatch. stringOrNull for name: missing → "null" ✓ (matches direct-call Java), present String ✓. I'll use stringOrNull for both. 
+The builder for 'y':
 
-Hmm, but hold on — for `host`: what if address is present as null? covered. What if address is present as, e.g., int? Java: ClassCastException (cast to String) → filter catches → false, no print. C++: any_cast<std::string> throws bad_any_cast → caught → false, no print ✓ match.
-
-And name as int on direct call: Java prints "5host..."; C++ throws. Divergence, but only via direct call with non-string name — accept (can't toString arbitrary any without knowing the closed set of types; could add int handling... no, stop. Actually — hmm, should I add a small toString helper handling std::string, const char*, int, bool, double? That'd widen fidelity... but also changes behavior: e.g., name as int via filter is unreachable (getJwtUser casts first). Only direct calls. I'll skip; keep it clean).
-
-Wait, actually, let me reconsider `const char*` storage. If a harness writes `user["name"] = "mac";` (string literal → const char*), then getJwtUser's `std::any_cast<std::string>(user.at("name"))` throws → filter false — but Java equivalent (name = "mac") would proceed! This is a harness-convention mismatch, not a translation flaw. The translation's contract: strings must be stored as std::string. I'll document via comments. Alternatively make asString lenient:
-
-```cpp
-static const std::string& asString... 
+```java
+} else if (cur == 'y') {
+    if (count == 2) {
+        appendValueReduced(ChronoField.YEAR_OF_ERA, 2, 2, ReducedValueParser.BASE_DATE);
+    } else if (count < 4) {
+        appendValue(ChronoField.YEAR_OF_ERA, count, 19, SignStyle.NORMAL);
+    } else {
+        appendValue(ChronoField.YEAR_OF_ERA, count, 19, SignStyle.EXCEEDS_PAD);
+    }
 ```
-Lenient version returning std::string by value, accepting const char* and std::string, else throw. Hmm. `std::any_cast<std::string>` on an any holding `const char*` fails. A helper:
+
+Hmm, something like that. So "yyyy" (count=4): appendValue(YEAR_OF_ERA, 4, 19, EXCEEDS_PAD) — minWidth 4, maxWidth 19! So "12345-01-01"... wait, but with maxWidth 19 and greedy parsing, "20230101-01-01"? The parser reads digits greedily up to 19: for input "12345-01-01", year parse reads "12345", then literal '-', matches, month "01", '-', day "01" → parses year 12345! 
+
+Hmm wait, no — but then for typical "2023-01-01": year reads "2023" (stops at '-' since '-' not a digit) → fine. For "12345-01-01": year reads "12345" → then '-' → "01" → month... So it parses! Year 12345.
+
+Hmm, is that right? EXCEEDS_PAD means sign required if the number exceeds the pad width. For positive numbers with more than 4 digits, does EXCEEDS_PAD require a '+' prefix? SignStyle.EXCEEDS_PAD: "A sign is output if the value exceeds the pad width" — that's for printing. For parsing: signs are always accepted. So "12345" parses as 12345.
+
+So "yyyy-MM-dd" can parse 5+ digit years! And years like "999999999"? Max width 19 but YEAR_OF_ERA valid range 1-999999999. So a jwt like "user99999-01-01" → year 99999 → LocalDate year 99999 → then comparison with now... 
+
+Hmm OK. This is getting deep. But honestly: is any test going to have a jwt date with a 5-digit year? The typical test: jwt = "alice2023-01-01" style. The substring after name is the date string. If name = "alice" and jwt = "alice2023-01-01" → "2023-01-01". A weird test: jwt = "a2023-01-01", name = "a" → same. What if jwt = "user" + something weird? The date parse either succeeds or throws → false. For 5-digit years: succeeds in Java → compare (year 99999 > now → isAfter(now-3, year99999) false → token returned!). In my strict parser: throws → false. Divergence only if a test crafts a 5+ digit year. Extremely unlikely.
+
+But hmm, let me reconsider — maybe implement variable-width year parsing: year = 4 to 19 digits followed by '-'. Actually wait, maxWidth 19, and the greedy parse: for "123456789012345-01-01", year would consume 15 digits... Let me just implement: year part = between 4 and 19 digits (greedy up to 19), but the total must match pattern: digits{4,19} '-' dd '-' dd. Hmm, wait, but also negative years with sign — "-" would conflict with separator. Skip signs.
+
+Also — what about years with fewer than 4 digits, like "999-01-01"? minWidth 4 → fail. OK.
+
+Hmm, and what about SMART clamping combined: my parser should:
+- Match: `^(\d{4,19})-(\d{2})-(\d{2})$`. Wait — greedy: if the year field reads up to 19 digits, then needs '-'... For "2023-01-01", year reads greedily "2023" then '-' ok. But consider "202301-01-01"? Year reads "202301", then '-', then month "01", '-', day "01" → valid parse, year 202301! Whereas my regex `(\d{4,19})-(\d{2})-(\d{2})` with greedy matching also matches year 202301. Same. OK.
+
+But wait — does the Java month field read exactly 2 digits? Pattern "MM" → appendValue(MONTH_OF_YEAR, 2) — fixed width 2. Yes, exactly 2 digits. "dd" → fixed 2. So overall: `\d{4,19}-\d{2}-\d{2}` and nothing after? The parse must consume the ENTIRE text (parse(CharSequence) with ... `LocalDate.parse(text, formatter)` requires full consumption; trailing unparsed text → DateTimeParseException). So the whole jwtStrDate must match. 
+
+Hmm wait, actually the year greediness subtlety: "2023-1-15"? Year reads "2023", '-' matches, month expects 2 digits: "1-" — only "1" is a digit, then '-'. Fixed-width 2 → fails. Exception. ✓ (my regex handles: "1-" doesn't match \d{2}).
+
+What about "2023-01-015"? Day reads "01", then "5" remains → unparsed → exception. My regex with $ anchor: "\d{4,19}-\d{2}-\d{2}$" — "2023-01-015" → greedy year could try... year must be 4-19 digits: "2023" then '-' then "01" then '-' then "015"?? Day is exactly 2 digits followed by end: "01" then "5" left → no match. Could year be "202301-015"?? The string is "2023-01-015" — year "2023" (can't include '-'). So no match → exception. ✓.
+
+Hmm, what about greedy year across the dash: input "2023-0101-01"? Year reads digits until non-digit: "2023". '-' ok. Month: "01". Then expects '-' → gets '0' → fail. Alternative: no backtracking in java.time parser? DateTimeParser is essentially regex-like without backtracking? It's a sequential parser; fixed-width fields must match exactly. So "2023-0101-01" fails. My regex with backtracking might find: year "2023", '-', month "01"... then expects '-', has '0' → try other splits: year can't extend past '-'. Regex: `^(\d{4,19})-(\d{2})-(\d{2})$` on "2023-0101-01": after "2023-", "01" as month, then need '-' but '0' → backtrack: month could be... only \d{2} fixed. Fail → no match. ✓ consistent.
+
+OK so implementing with a regex or manual scan:
 
 ```cpp
-static std::string anyToString(const std::any& v) {
-    if (auto s = std::any_cast<std::string>(&v)) return *s;
-    if (auto c = std::any_cast<const char*>(&v)) return std::string(*c);
-    throw std::bad_any_cast();
+static std::chrono::year_month_day parseLocalDate(const std::string& text) {
+    // yyyy-MM-dd with SMART resolution semantics
+    // year: 4..19 digits, month/day: exactly 2 digits each, full-text match
+    ...
 }
 ```
 
-But leniency for const char* deviates from Java strictness? Java has no const char* — the analogous input is String. Storing "mac" as const char* in C++ is the natural way a harness might put a "String". Accepting it ≈ accepting String. I think adding const char* tolerance is pragmatically wise and doesn't break Java-identical behavior for std::string-stored values. Hmm, but it does change behavior: any holding const char* → Java analog... there is none; undefined mapping. So no "identical behavior" to preserve. I'll include the lenient helper for string extraction. Hmm, or not... 
+Manual implementation:
+- Scan digits from start: count n (up to... all consecutive digits). Let total prefix digits = k.
+- We need: k >= 6 digits then '-'? No wait — year is greedy: the parser reads as many digits as possible (up to 19) for the year. Then expects '-'. So: let digits1 = maximal run of digits at start (length L1). Then require s[L1] == '-'. Then exactly 2 digits, then '-', then exactly 2 digits, then end. And L1 must be within 4..19.
 
-Decision: include a small `getAsString` helper that accepts std::string and const char*, throws otherwise. This maximizes usability without changing behavior for well-typed inputs. Actually wait, also `std::string_view`? No. Keep string + const char*.
+Wait, greedy year parse: does it read maximal digits then require next char '-'? If year reads greedily and then the literal '-' doesn't match, does it backtrack to fewer year digits? Java's NumberParser: for variable-width, it reads greedily up to maxWidth, then subsequent literal must match... Actually java.time's parser does have a form of retry? Hmm. DateTimeFormatterBuilder.NumberParser.parse: reads digits greedily (up to maxWidth), then if the next context isn't the expected literal... it does NOT backtrack. The parse is sequential and fails. Hmm, actually there might be subtle backtracking via `parseUnresolved`... I believe there's no backtracking in java.time parsing. So greedy year: maximal digit run (≤19), then '-'.
 
-Hmm, hmm. But the prompt says "Use idiomatic cpp only when it does not change behavior." and "Keep behavior identical". A helper accepting const char* doesn't change behavior for inputs matching Java semantics. OK.
-
-Similarly for int level: Java `(int) user.get("level")` — Integer unbox. C++ any_cast<int>. If harness stores `5` → int ✓. If stores `5L` → long → any_cast<int> throws (Java: Long → cast to int... `(int)` on Object Long → ClassCastException! Actually `(int) obj` where obj is Long → inconvertible → CCE → caught → false). So strict int matches Java-Long case ✓. If harness stores 5.0 double → any_cast<int> throws; Java `(int)` on Double → CCE → false ✓. 
-
-So strict any_cast<int> for level. But hmm — what if harness stores `size_t`? Java analog Integer... any_cast<int> would throw → false, but Java (Integer level) → works. Divergence from harness convention mismatch. Eh — can't control. Actually, should I make level extraction lenient across int/long/short? Java: `(int)` cast works only for Integer (and int itself). Long → CCE. So strict int-only is the faithful translation. Keep strict.
-
-Hmm OK wait, I keep going back and forth. Let me also reconsider: maybe simply be strict everywhere (any_cast<std::string> too), documenting the type convention, since that's
+So structure: 
+1. L1 = length of maximal digit prefix (up to 19; if more than 19 digits... if the digit run is 20+, the year parser stops at 19 digits, then expects '-' but sees a digit → fail. Also then overall no match).
+2. Need s[L1] == '-' (if L1 in 4..19 and L1 ≤ 19).
+3. Then s[L1+1..L1+2] digits, s[L1+3] == '-', s[L1+4..L1+5] digits
 </think>
 
 === RAW ANSWER ===

@@ -1,0 +1,856 @@
+=== PROMPT VARIANT ===
+qwen
+
+=== SOURCE CODE (java) ===
+package org.example;
+
+import com.google.gson.Gson;
+
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+
+public class JSONProcessor {
+
+    public Map<String, Object> readJson(String filePath) {
+        if (!Files.exists(Paths.get(filePath))) {
+            return null;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            return new Gson().fromJson(reader, Map.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public boolean writeJson(Map<String, Object> data, String filePath) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            new Gson().toJson(data, writer);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public boolean processJson(String filePath, String removeKey) {
+        Map<String, Object> data = readJson(filePath);
+        if (data == null) {
+            return false;
+        }
+        if (data.containsKey(removeKey)) {
+            data.remove(removeKey);
+            return writeJson(data, filePath);
+        } else {
+            return false;
+        }
+    }
+}
+
+=== PROMPT ===
+You are an expert programmer. Translate the following java code to cpp.
+- Keep behavior identical, including inputs/outputs, side effects, edge cases, and exceptions.
+- Use idiomatic cpp only when it does not change behavior.
+
+```java
+package org.example;
+
+import com.google.gson.Gson;
+
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+
+public class JSONProcessor {
+
+    public Map<String, Object> readJson(String filePath) {
+        if (!Files.exists(Paths.get(filePath))) {
+            return null;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            return new Gson().fromJson(reader, Map.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public boolean writeJson(Map<String, Object> data, String filePath) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            new Gson().toJson(data, writer);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public boolean processJson(String filePath, String removeKey) {
+        Map<String, Object> data = readJson(filePath);
+        if (data == null) {
+            return false;
+        }
+        if (data.containsKey(removeKey)) {
+            data.remove(removeKey);
+            return writeJson(data, filePath);
+        } else {
+            return false;
+        }
+    }
+}
+```
+
+Try to avoid:
+- bouncing between partial code and repeated redesign;
+- reopening the mapping for every local implementation detail;
+- expanding one local translation doubt into a full restructuring cycle.
+
+Output only the translated cpp code in a code block.
+
+=== REASONING ===
+<think>
+Let me analyze the Java code carefully:
+
+1. `readJson(String filePath)`:
+   - Checks if file exists; if not, returns null.
+   - Opens a BufferedReader over FileReader, uses Gson to deserialize into a `Map<String, Object>`.
+   - On any exception, returns null.
+
+2. `writeJson(Map<String, Object> data, String filePath)`:
+   - Opens a BufferedWriter over FileWriter, uses Gson to serialize the map.
+   - Returns true on success, false on exception.
+
+3. `processJson(String filePath, String removeKey)`:
+   - Reads JSON. If null, returns false.
+   - If data contains removeKey, removes it and writes back; returns write result.
+   - Else returns false.
+
+Now translating to C++. To keep behavior identical, I need a JSON library. The most idiomatic choice would be nlohmann/json. Since Gson maps JSON objects to `Map<String, Object>`, and nlohmann's `json` object behaves like a map, I can use `nlohmann::json`.
+
+Key behavioral considerations:
+
+- `readJson` returns null if file doesn't exist → in C++, I can return `std::optional<nlohmann::json>` or a pointer. Using `std::optional<nlohmann::json>` is idiomatic. Or return `nlohmann::json` with a bool flag... `std::optional` is cleaner.
+
+- Gson's `fromJson(reader, Map.class)` — if the JSON is malformed, it throws JsonSyntaxException, caught → null. Also if the file is empty, Gson returns null for `fromJson` (returns null when the JSON is empty string / "null"?). Actually Gson: if the reader has no data (empty), `fromJson` returns null. If the JSON literal is `null`, it returns null too. In that case, `readJson` returns null (Java null). Hmm, but the map would be null, so `processJson` would return false. With nlohmann, parsing empty string throws a parse error, so returning nullopt matches. Parsing `null` gives `json(nullptr)` which is not null-object; but Gson would return Java null. Hmm. To match behavior: Gson returns null if the document is literal `null` or empty. So `data == null` → `processJson` returns false. With nlohmann, `json::parse("null")` succeeds and yields null json. Then `data.contains(removeKey)` would be false (it's not an object), so `processJson` returns false anyway. But `readJson` itself would return a non-null optional containing null json vs Java returning null. For strictness, I could check: if parsed json is null or not an object, return nullopt? Hmm, but Gson's Map.class deserialization: if the JSON is, say, `[1,2,3]` (an array), Gson would throw JsonSyntaxException (expected BEGIN_OBJECT but was BEGIN_ARRAY), caught → null. If the JSON is `"string"`, also exception → null. If number → exception → null. So Gson only returns non-null for a JSON object at top level, or literal `null`/empty which yields Java null.
+
+So for behavior identity: readJson returns a valid map only when the top-level JSON is an object. Otherwise returns null (empty). Hmm, but do I need to be that pedantic? The instructions say keep behavior identical including edge cases. Let me handle: parse; if parse fails or result is not an object → return nullopt. That matches Gson behavior closely (Gson: non-object → exception → null; null/empty → null).
+
+Actually wait — Gson with `Map.class`: deserializing `{...}` works. Deserializing literal `null` returns null without exception. Empty input returns null. So mapping all of these to `std::nullopt` is right, and non-object → nullopt too.
+
+- `writeJson`: Gson's `toJson(data, writer)` writes compact JSON. nlohmann's dump() is compact by default. Java Map<String,Object> serialized by Gson: keys in... Gson serializes map entries — for HashMap, order is hash order, not insertion order. nlohmann json object is `std::map<std::string, json>` by default (ordered lexicographically). Hmm — key ordering differs, but that's a minor difference; the JSON content semantics are the same. Should I worry? The output file byte content could differ in key order. For "identical behavior", strictly the file content would differ if keys were inserted in non-sorted order. But Java HashMap ordering is effectively arbitrary (hash-based), so any deterministic ordering in C++ is arguably fine. I could use `nlohmann::ordered_json` to preserve insertion order, which is more predictable. Hmm. The Java code uses HashMap, so iteration order is hash order. Neither sorted nor insertion order matches. I'll just use nlohmann::json (sorted) or ordered_json. I think ordered_json preserving insertion order is nicer since the map comes from reading a JSON file — it would preserve the file's key order on write. Actually with `nlohmann::json` (std::map), keys get sorted alphabetically on write. With `ordered_json`, keys preserve the order from parse. Neither exactly matches Java HashMap's order. I'll pick one — maybe `nlohmann::json` for idiomatic, but `ordered_json` keeps file round-trip more stable. Hmm.
+
+Given the ambiguity, I'll use `nlohmann::json`. Actually, let me think about which better preserves "behavior". The Java program reads a file, removes a key, writes back. Gson output ordering for HashMap is unspecified/arbitrary. So neither choice is wrong. I'll go with `nlohmann::ordered_json` to preserve the original file ordering minus removed key — that seems closest to intent. Hmm, but honestly either is fine. Let me decide: `nlohmann::json` is the most idiomatic. But round-trip with ordered_json preserves the input order, which is arguably "more identical" in spirit. I'll use `nlohmann::json`... Let me think again.
+
+Actually the type matters for the function signature: `std::optional<nlohmann::json> readJson(...)`. And `writeJson(const nlohmann::json& data, ...)`. Fine.
+
+One more consideration: Gson writes compact JSON without spaces — nlohmann `dump()` default is compact without spaces. Good. Escaping: Gson escapes some characters like `/`? Actually Gson by default escapes HTML characters like `<`, `>`, `&`, `=`, `'` as unicode escapes, and `/`? Gson escapes `/` as `\/`? Let me recall: Gson default HTML-safe escaping: it escapes `<`, `>`, `&`, `=`, `'` into `\u003c` etc. And also `/`? Hmm, I believe Gson escapes `/`? No wait. Gson's `HTML-safe` mode is on by default? Actually Gson's default JSONWriter has `htmlSafe = true`. Yes, Gson by default is HTML-safe: escapes `<`, `>`, `&`, `=`, `'`. Also it escapes `\u2028` and `\u2029`. nlohmann doesn't do HTML-safe escaping. This is an edge case difference in output bytes for keys/values containing those chars. I think that's too pedantic to replicate; the task is a reasonable translation. I won't replicate HTML escaping — that would be over-engineering. The main behavior: read/parse, remove key, write compact JSON.
+
+- `writeJson` failure cases: FileWriter throws IOException e.g., if path is invalid/permission denied → false. In C++, ofstream fails silently; need to check stream state. So: open ofstream, check if open succeeded, write, flush, check stream good → return true else false.
+
+- `readJson`: FileReader throws FileNotFoundException if file can't be opened (exists but no permission) → caught → null. In C++: check file exists (std::filesystem::exists), then open ifstream; if fail → nullopt. Parse; on parse_error → nullopt.
+
+Note: `Files.exists` throws InvalidPathException? Actually `Paths.get(filePath)` throws InvalidPathException (unchecked) if the path string is invalid — that would propagate out of readJson since it's before the try block! Wait: `Files.exists(Paths.get(filePath))` is before the try-with-resources, so InvalidPathException would propagate to the caller, not be caught. Similarly in writeJson, `new FileWriter(filePath)` is inside try so it's caught. And processJson calls readJson — if readJson throws InvalidPathException, processJson would propagate it. In C++, `std::filesystem::exists` with invalid path throws? On most platforms, `std::filesystem::exists` returns false for nonexistent paths, and may throw `filesystem_error` on underlying errors. Invalid path strings in C++ are less of a thing (no null bytes allowed — passing a string with embedded null would... std::string can contain nulls; filesystem path construction with embedded null is allowed on POSIX? Actually `std::filesystem::path` disallows? Hmm). This is very deep edge-case territory; the guidance says avoid expanding local doubts into restructuring. I'll wrap filesystem::exists in a way that returns false on error: `std::filesystem::exists` can throw; I could use the non-throwing overload `exists(path, ec)`. That deviates from Java (which would propagate InvalidPathException)... but honestly, returning false on error is close enough and safer. Actually, hmm, to keep it simple and robust, I'll use `std::error_code ec; if (!std::filesystem::exists(filePath, ec) || ec) return std::nullopt;` — well, if ec set, exists returns false anyway. So just `if (!std::filesystem::exists(filePath, ec)) return std::nullopt;`.
+
+Hmm wait, but should I use `std::filesystem::exists` throwing version to mimic exception propagation? Java's `Files.exists` can also throw IOException (checked) — actually `Files.exists` declares `throws IOException` for the case where the path exists but... it throws IOException if the path exists but stat fails? Actually Files.exists returns false if it can't determine. The declared IOException occurs rarely. If it throws, it propagates out of readJson (unchecked? no, IOException is checked — but the method doesn't declare it... wait, `Files.exists(Path, LinkOption...)` throws IOException. readJson doesn't declare throws IOException. So the Java code wouldn't compile? Let me check: `public Map<String, Object> readJson(String filePath)` — inside, `Files.exists(Paths.get(filePath))` — Files.exists declares `throws IOException`. Since IOException is checked and readJson doesn't declare it and doesn't catch it... the code wouldn't compile! Hmm, unless... Let me verify: `public static boolean exists(Path path, LinkOption... options) throws IOException`. Yes, it throws IOException. So the given Java code has a compile error? Wait — maybe not; let me double check. Java's `Files.exists(Path, LinkOption...)` signature: `public static boolean exists(Path path, LinkOption... options)`. Hmm, I need to recall. I believe it's:
+
+```java
+public static boolean exists(Path path, LinkOption... options) {
+```
+
+Actually, checking my memory of java.nio.file.Files: `exists` does NOT throw IOException — it returns false if the file cannot be accessed or does not exist. Let me recall the docs: "Returns: true if the file exists; false if the file does not exist or its existence cannot be determined." And throws only `SecurityException`. Hmm, but I recall some methods like `notExists` similarly. Actually I think `Files.exists` doesn't declare IOException. Let me think... `Files.exists` — docs: "Tests whether a file exists. ... This method returns false if it cannot determine whether the file exists or not." Signature: `public static boolean exists(Path path, LinkOption... options)` — no throws IOException. Yes, I'm fairly confident Files.exists doesn't throw IOException (unlike Files.isDirectory? no that also doesn't... Files.size throws IOException, Files.readAllLines throws IOException). Files.exists: no IOException. OK good, the Java compiles.
+
+So in Java: readJson: if path invalid → InvalidPathException (unchecked) propagates. File doesn't exist → null. FileReader fails (e.g. permission) → FileNotFoundException inside try → caught → null. Gson parse error → caught → null. Empty file → Gson returns null → returns null.
+
+In C++ translation, I'll use error_code to avoid throwing, treating errors as "doesn't exist" → nullopt. That's a reasonable, safe mapping. The exception-propagation nuance for invalid paths is a Java-specific pathology that doesn't map cleanly; I'll note it's fine.
+
+Now the structure: The Java class `JSONProcessor` with three public methods. C++ equivalent: a class `JSONProcessor` with the same methods. Use nlohmann/json.
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <nlohmann/json.hpp>
+
+class JSONProcessor {
+public:
+    std::optional<nlohmann::json> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;
+        }
+        std::ifstream file(filePath);
+        if (!file) {
+            return std::nullopt;
+        }
+        try {
+            nlohmann::json data = nlohmann::json::parse(file);
+            if (!data.is_object()) {
+                return std::nullopt; // Gson's Map.class would fail on non-objects
+            }
+            return data;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    bool writeJson(const nlohmann::json& data, const std::string& filePath) {
+        std::ofstream file(filePath);
+        if (!file) {
+            return false;
+        }
+        try {
+            file << data.dump();
+            return file.good();
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<nlohmann::json> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+```
+
+Wait — one nuance: Gson `fromJson(reader, Map.class)` on a JSON object: values become... nested objects become `Map<String,Object>` (LinkedTreeMap), numbers become doubles, etc. nlohmann json handles all that natively. Fine.
+
+Another nuance: In `processJson`, Java checks `data.containsKey(removeKey)`. nlohmann `contains` works for objects. Since readJson guarantees an object, fine.
+
+Another nuance: Gson `toJson(data, writer)` where data is the Map — writes compact JSON. nlohmann dump() compact. Good.
+
+Edge: `writeJson` — if data is null json? In our flow data is always an object. But writeJson is public and could be called with anything; Gson `toJson(null map)` writes "null". nlohmann dump of null json → "null". Fine. Also `toJson` of a Map — if called with null map, Gson writes "null". Matches.
+
+Edge: FileWriter truncates existing file. ofstream default truncates. Good. FileWriter creates file if it doesn't exist — ofstream also creates. Good.
+
+Edge: Java's FileWriter uses default charset; Gson toJson writes chars — for JSON output it's all ASCII-ish (Gson escapes non-ASCII? No, Gson doesn't escape non-ASCII by default, it outputs them as-is in UTF-8? Actually Gson writes the raw characters; FileWriter with default charset encodes them). nlohmann dump() by default escapes non-ASCII? No — nlohmann dump() with ensure_ascii=false (default) keeps them as UTF-8. Good enough.
+
+Edge: `data->contains(removeKey)` — nlohmann `contains` on an object. Good. `erase(removeKey)` removes the key. Good.
+
+Also, what if readJson's parse succeeds but yields a JSON object with duplicate keys? nlohmann keeps the last; Gson also keeps last for Map. Fine.
+
+Should I worry about `catch (const std::exception&)` around parse — nlohmann throws `json::parse_error` (derives from std::exception) and also `json::exception`. parse_error derives from exception. Also could throw `std::bad_alloc` etc. Catch `const std::exception&` covers. Also `catch (...)` to be extra safe. Java `catch (Exception e)` catches all exceptions (not Errors). C++ `catch (...)` catches everything. I'll use `catch (...)` for closest match.
+
+For writeJson, `file << data.dump()` — dump could throw (type_error only for invalid UTF-8). Actually dump throws type_error.316 on invalid UTF-8. Catching is fine. Also checking `file.good()` after write handles I/O errors. But note: Java's try-with-resources closes the writer; close() can throw IOException which is caught → false. In C++, ofstream destructor closes silently; errors on close aren't detectable without explicitly calling close() and checking. To be thorough: write, flush, check good; also could call file.close() and check. Let me do:
+
+```cpp
+try {
+    const std::string out = data.dump();
+    file << out;
+    file.flush();
+    if (!file.good()) return false;
+    file.close();
+    return file.good()... 
+```
+
+Hmm, after close(), `file.good()`? The stream state persists; failbit would be set on failed close? On most implementations, close() sets failbit if it fails. Checking `!file.fail()` after close is a common idiom. Let me do:
+
+```cpp
+file.flush();
+file.close();
+return !file.fail();
+```
+
+Wait but flush then close — close flushes anyway. Let me write:
+
+```cpp
+file << data.dump();
+file.close();
+return !file.fail();
+```
+
+close() flushes; if any write failed or close failed, failbit is set. That's clean and covers the Java semantics (exception on close → false).
+
+Hmm, one subtlety: `file << data.dump()` — writing can set failbit but not throw (unless the stream has exceptions mask set). Fine.
+
+Now, about the type: should I use `nlohmann::json` or define a typedef? Also the return `std::optional<nlohmann::json>` — Java returns `Map<String, Object>` or null. Optional is the idiomatic C++ mapping for nullable returns.
+
+Also should I keep it in a namespace `org::example` to mirror the package? The Java package is `org.example`. C++ could use `namespace org { namespace example { ... } }`. That's a faithful touch. I'll include it — harmless and mirrors structure. Or keep it simple. I think adding the namespace is a nice faithful mapping. But header include of nlohmann in a code block... The answer should be self-contained cpp code. I'll include the class within `namespace org::example`.
+
+Also, `Map<String, Object>` vs `nlohmann::json`: since Gson's Map deserialization yields Map only for objects, and I enforce is_object, the JSON type works.
+
+One more nuance: Java `readJson` returns the raw Gson result: `new Gson().fromJson(reader, Map.class)`. If JSON top-level is an object → Map. If it's `null` literal → returns Java null (not caught — returns null). If empty → null. If array/string/number/bool → JsonSyntaxException → caught → null. So my mapping: parse ok and is_object → return; else nullopt. 
+
+What about a top-level object — returned. What about `true`? Gson: expected BEGIN_OBJECT, got BOOLEAN → exception → null. My is_object check → nullopt. Match.
+
+Now `processJson` — uses `data.containsKey` — only on non-null data (a Map). Fine.
+
+Let me also think: should readJson use a buffered reader? Java wraps BufferedReader, but that's just performance; Gson reads through it. C++ ifstream is fine.
+
+FileReader uses default charset — reading bytes and decoding. If file has invalid encoding... Gson would produce replacement chars or throw? Edge case too deep. nlohmann parse requires valid UTF-8, throws otherwise → nullopt. Java would likely mangle but not throw. Minor divergence, acceptable.
+
+Also: `std::filesystem::exists(filePath, ec)` — with a path like a directory: exists returns true, ifstream open on a directory — on Linux, opening a directory with ifstream succeeds but reading fails → parse error → nullopt. Java: FileReader on a directory throws FileNotFoundException (on Linux, `isDirectory` check in FileOutputStream? Actually FileReader opening a directory on Unix: FileInputStream constructor throws FileNotFoundException("Is a directory")? On Linux, open(2) on a directory with O_RDONLY succeeds, but Java's FileInputStream checks: it uses open and then checks if it's a directory and throws FileNotFoundException. Yes, Java's UnixFileSystem/UnixFileSystem native code checks. So Java → exception → null. C++ → parse fail → nullopt. Match on outcome.
+
+Now writing the final code. Also add `#include <iostream>`? Not needed. Keep includes minimal: `<filesystem>`, `<fstream>`, `<optional>`, `<string>`, `<nlohmann/json.hpp>`.
+
+Should I add a small note? The instructions say "Output only the translated cpp code in a code block." So just the code. Maybe a brief comment about needing nlohmann/json — but "output only the translated cpp code". I'll put a comment in the code noting the dependency, which is part of the code. That's acceptable.
+
+Let me also double check `contains` and `erase` API: `json::contains(key)` exists (since 3.2?). `json::erase(key)` — for objects, erase by key exists (returns count). Yes.
+
+One thing: `data->contains(removeKey)` — `data` is `std::optional<json>`, `operator->` gives `json*`. Good.
+
+Also consider: in processJson, after erase, we writeJson(*data, filePath). Good.
+
+Also the Java class has no constructor logic; C++ class default fine. Methods non-static in Java; keep non-static in C++.
+
+Let me also consider whether to make readJson return `std::optional<nlohmann::json>` or a pointer `std::unique_ptr<...>`. Optional is idiomatic.
+
+Also mimic: Java methods are public. C++ public.
+
+Final code:
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+namespace org::example {
+
+// Equivalent of the Gson-based Java original.
+// `Map<String, Object>` (object-only, nullable) maps to
+// `std::optional<nlohmann::json>` with an object guarantee,
+// matching Gson's fromJson(reader, Map.class) semantics.
+class JSONProcessor {
+public:
+    std::optional<nlohmann::json> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;
+            }
+            nlohmann::json data = nlohmann::json::parse(reader);
+            // Gson with Map.class only succeeds for a top-level JSON object;
+            // empty input / "null" / non-objects all end up as null in Java.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    bool writeJson(const nlohmann::json& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;
+            }
+            writer << data.dump();
+            writer.close();
+            return !writer.fail();
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<nlohmann::json> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+} // namespace org::example
+```
+
+Wait — one issue: `nlohmann::json::parse(reader)` on an empty stream: parse of empty input throws parse_error ("unexpected end of input"). Caught → nullopt. Java: empty file → Gson returns null → readJson returns null. Match.
+
+Parse of "null" → json nullptr → is_object false → nullopt. Java: Gson returns null → null. Match.
+
+Hmm, one more consideration: `nlohmann::json::parse(reader)` — there is an overload taking an istream. Yes.
+
+Also `catch (...)` covers parse_error. Good.
+
+What about the `ec` in `std::filesystem::exists(filePath, ec)` — if an error occurs, exists returns false, so we return nullopt. Java's Files.exists returns false when existence can't be determined → null. Match. 
+
+Also note: Java's `Paths.get` with invalid path (e.g., NUL character in string) throws InvalidPathException which propagates (not caught). C++ filesystem::exists with embedded NUL — on POSIX, path with embedded NUL... `std::filesystem::path` from string with embedded nulls: POSIX treats them as part of the path? Actually native APIs would fail with ENAMETOOLONG or similar; error_code set → false → nullopt. Slight divergence (exception vs null), but this is acceptable; making C++ throw to mimic Java's exception propagation would be over-engineering. The guidance explicitly says avoid expanding local doubts into full restructuring.
+
+Hmm, should I consider `processJson`'s contains check: Java `containsKey` on Map. Also note `data->contains` — if data is object. Guaranteed. Good.
+
+One more: Should writeJson take `const nlohmann::json&`? Java signature: `writeJson(Map<String, Object> data, String filePath)`. In processJson, Java passes the mutated map. C++ passes `*data`. Good.
+
+Do I want `#include <stdexcept>`? Not needed.
+
+Also, maybe provide a note comment about compilation: `-lstdc++fs` for older GCC, and nlohmann json dependency. A short comment is fine.
+
+I think the code is solid. Let me also double-check `writer << data.dump()` handles exceptions: dump may throw type_error (invalid UTF-8 in strings) → caught → false. In Java, Gson toJson with weird strings wouldn't throw typically. Edge divergence acceptable.
+
+Also, should writeJson check that the writer is open — done via is_open. Also `ofstream` default mode out|trunc — matches FileWriter truncation.
+
+Also note: Java FileWriter doesn't truncate atomically or anything; fine.
+
+One subtle thing: In writeJson, after `writer.close()`, checking `!writer.fail()`. If the stream already had failbit set before close, fail remains. If close fails, most implementations set failbit (per standard, close calls setstate(failbit) on failure... actually the standard says basic_ofstream::close calls rdbuf()->pubsync? Let me recall: `basic_ofstream::close()` — if rdbuf is null → setstate(failbit); else calls rdbuf()->close(), and if that returns null pointer, setstate(failbit). filebuf::close flushes and closes; returns null on failure. So yes, failbit set on close failure. Good — checking `!writer.fail()` after close covers write + flush + close errors, matching Java's try-with-resources where close() throwing IOException results in false.
+
+Also, should writeJson's `catch (...)` — ofstream operations don't throw by default; dump can throw. Fine.
+
+Let me also think about whether to name methods exactly the same — yes: readJson, writeJson, processJson.
+
+Also, Java's `readJson` catch is around the reader creation too (try-with-resources resource initialization is inside try). So FileReader failure → caught → null. My ifstream open check inside try → nullopt. Also I put `std::filesystem::exists` outside try (matching Java where Files.exists is outside try). But exists with ec doesn't throw anyway. Fine.
+
+Actually hold on — should `exists` throwing version be used inside to mirror? Java: `Files.exists(Paths.get(filePath))` — Paths.get throws InvalidPathException (propagates), Files.exists may throw SecurityException (propagates). In C++ there's no direct analog; using the ec overload is the pragmatic choice. I'll keep ec.
+
+One more design question: return type of readJson. Java returns `Map<String, Object>`. In C++ I could typedef `using JsonObject = nlohmann::json;` or use `nlohmann::ordered_json` to keep insertion order (like Gson's LinkedTreeMap which preserves insertion order for reading!). Wait — interesting: Gson's fromJson with Map.class returns LinkedTreeMap, which preserves insertion order! And in processJson, the map read comes from Gson (LinkedTreeMap), so serialization order = original file order (minus removed key). Gson's toJson on a LinkedTreeMap writes keys in insertion order = file order. So `nlohmann::ordered_json` (which preserves insertion order) would match the round-trip behavior exactly: read file (order preserved), remove key, write (same order minus key). With `nlohmann::json` (std::map), keys get sorted — differs from Java behavior where output preserves input order.
+
+That's a strong argument for `ordered_json`! Gson's LinkedTreeMap preserves encounter order. So `nlohmann::ordered_json` matches Java behavior better. Yes, I'll use `nlohmann::ordered_json`.
+
+Hmm wait, but `new Gson().fromJson(reader, Map.class)` — the return type is LinkedTreeMap? Gson's default map type is LinkedTreeMap which maintains insertion order. Yes. And toJson serializes in iteration order → insertion order. So round-trip preserves key order. `ordered_json` preserves insertion order on parse and iteration. 
+
+So use `nlohmann::ordered_json` throughout. `ordered_json::parse`, `is_object`, `contains`, `erase`, `dump` all exist (it's `basic_json<std::map>`).
+
+Type alias: `using JsonMap = nlohmann::ordered_json;` — nice for readability.
+
+Let me finalize:
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+namespace org::example {
+
+// Gson's fromJson(reader, Map.class) yields a LinkedTreeMap (insertion-ordered,
+// objects only); nlohmann::ordered_json matches that behavior, and
+// std::optional represents the Java-null return.
+using JsonMap = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: public Map<String, Object> readJson(String filePath)
+    std::optional<JsonMap> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;
+            }
+            JsonMap data = JsonMap::parse(reader);
+            // Gson can only produce a Map from a top-level JSON object;
+            // empty input, "null" and non-object documents all become null.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    // Java: public boolean writeJson(Map<String, Object> data, String filePath)
+    bool writeJson(const JsonMap& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;
+            }
+            writer << data.dump();  // Gson's default output is compact JSON
+            writer.close();         // mirrors try-with-resources close()
+            return !writer.fail();
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Java: public boolean processJson(String filePath, String removeKey)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonMap> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+}  // namespace org::example
+```
+
+Hmm, one thought: should readJson also catch errors thrown by `std::filesystem::exists`? With ec overload, no throw. Good.
+
+Also, `writer << data.dump()` — is there an `operator<<` for json? Yes, `operator<<(std::ostream&, const basic_json&)` writes compact serialization. But I use dump() explicitly — either works. dump() returns string; fine.
+
+Wait, there's a subtle thing with `writer.close(); return !writer.fail();` — but if writing succeeded and close succeeded, fail() is false → true. If the file couldn't be fully flushed (disk full), failbit set → false. Matches Java IOException → false. 
+
+Also consider: Java `FileWriter` creates the file even if data serialization later fails? In Java, Gson toJson writes directly to the writer; if it throws mid-way, file is partially written and possibly left (truncated/created). C++: ofstream created at open; same. Fine.
+
+Edge: writeJson where filePath is an existing directory: Java FileWriter throws IOException (is a directory) → false. C++ ofstream open on directory: on Linux, open with O_WRONLY on a directory fails (EISDIR) → is_open false → false. Match. On Windows also fails. Good.
+
+Edge: `readJson` where filePath is a directory: exists → true; ifstream on directory on Linux opens fine (libstdc++ opens directories read-only successfully? Actually filebuf::open on a directory — open(2) with O_RDONLY on a directory succeeds on Linux; libstdc++ may succeed opening). Then parse(reader) reads — reading from a directory fd fails (EISDIR) → istream sets failbit → parse throws parse_error → caught → nullopt. Java: FileReader on directory → FileNotFoundException → caught → null. Match.
+
+Also, what about `JsonMap::parse(reader)` — for ordered_json, parse is inherited static. Yes, `ordered_json::parse` works.
+
+I think there might be one more consideration: `data->contains(removeKey)` — for ordered_json, contains(const typename object_t::key_type&). Yes.
+
+`data->erase(removeKey)` — erase(key_type) — for objects, erase by key. Yes.
+
+Now, about "Output only the translated cpp code in a code block" — I'll output just the code block, possibly with a couple of inline comments (comments are part of code, fine). Maybe include a top comment about dependency: requires nlohmann/json (single header). That's a comment in the code. Acceptable.
+
+Let me also double check includes: std::optional needs <optional>; std::string needs <string>; fstream; filesystem; error_code is in <system_error> — but <filesystem> pulls it in typically; to be safe, include <system_error>. Yes, std::error_code is declared in <system_error>. I'll add it.
+
+Final check on namespace: `namespace org::example` requires C++17. We're already using C++17 for filesystem/optional. Fine. Or nested `namespace org { namespace example {` for older compat — C++17 is required anyway, keep the compact form. Actually, to be safe with compilers, both fine. Keep compact.
+
+Also should the class be `JSONProcessor` — match Java name exactly. Yes.
+
+One more consideration about `readJson` return: Java returns `Map<String, Object>` which could contain nested structures as Maps/Lists/primitives. ordered_json models that. Good.
+
+Also, do I need to handle BOM? Gson handles? Not really. Skip.
+
+Double-check the "avoid bouncing" instructions: they want a single, confident output. Just the code block.
+
+Final code:
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <system_error>
+
+#include <nlohmann/json.hpp>  // https://github.com/nlohmann/json (single header)
+
+namespace org::example {
+
+// Java's `Map<String, Object>` from Gson's `fromJson(reader, Map.class)` is a
+// LinkedTreeMap: JSON objects only, insertion-ordered, nullable.
+// nlohmann::ordered_json + std::optional reproduces those semantics.
+using JsonMap = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: public Map<String, Object> readJson(String filePath)
+    std::optional<JsonMap> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;  // like FileReader's FileNotFoundException
+            }
+            JsonMap data = JsonMap::parse(reader);
+            // Gson can only produce a Map for a top-level JSON object;
+            // empty input, "null", arrays and scalars all end up as null.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;  // Java: catch (Exception e) { return null; }
+        }
+    }
+
+    // Java: public boolean writeJson(Map<String, Object> data, String filePath)
+    bool writeJson(const JsonMap& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;  // like FileWriter's IOException
+            }
+            writer << data.dump();  // Gson's default output is compact JSON
+            writer.close();         // try-with-resources close(); failure -> false
+            return !writer.fail();
+        } catch (...) {
+            return false;  // Java: catch (Exception e) { return false; }
+        }
+    }
+
+    // Java: public boolean processJson(String filePath, String removeKey)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonMap> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+}  // namespace org::example
+```
+
+This looks complete and faithful. One last sanity check on `parse(reader)`: `static basic_json parse(istream&)` — actually the signature is `parse(iotype& iop, parser_callback_t cb = nullptr, bool allow_exceptions = true, bool ignore_comments = false)`. Yes, parse from istream works, throws parse_error on invalid input by default. Good.
+
+Also note: parse from a stream where the stream has failbit set before reading (e.g., reading a directory fails immediately) — parse throws parse_error → caught. Good.
+
+Also `JsonMap::parse(reader)` — for ordered_json, parse is inherited static. Yes, `ordered_json::parse` works.
+
+I think there might be one more consideration: `data->contains(removeKey)` — for ordered_json, contains(const typename object_t::key_type&). Yes.
+
+`data->erase(removeKey)` — erase(key_type) — for objects, erase by key. Yes.
+
+Now, about "Output only the translated cpp code in a code block" — I'll output just the code block, possibly with a couple of inline comments (comments are part of code, fine). Maybe include a top comment about dependency: requires nlohmann/json (single header). That's a comment in the code. Acceptable.
+
+Let me also double check includes: std::optional needs <optional>; std::string needs <string>; fstream; filesystem; error_code is in <system_error> — but <filesystem> pulls it in typically; to be safe, include <system_error>. Yes, std::error_code is declared in <system_error>. I'll add it.
+
+Final check on namespace: `namespace org::example` requires C++17. We're already using C++17 for filesystem/optional. Fine. Or nested `namespace org { namespace example {` for older compat — C++17 is required anyway, keep the compact form. Actually, to be safe with compilers, both fine. Keep compact.
+
+Also should the class be `JSONProcessor` — match Java name exactly. Yes.
+
+One more consideration about `readJson` return: Java returns `Map<String, Object>` which could contain nested structures as Maps/Lists/primitives. ordered_json models that. Good.
+
+Also, do I need to handle BOM? Gson handles? Not really. Skip.
+
+Double-check the "avoid bouncing" instructions: they want a single, confident output. Just the code block.
+
+Final code:
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <system_error>
+
+#include <nlohmann/json.hpp>  // https://github.com/nlohmann/json (single header)
+
+namespace org::example {
+
+// Java's `Map<String, Object>` from Gson's `fromJson(reader, Map.class)` is a
+// LinkedTreeMap: JSON objects only, insertion-ordered, nullable.
+// nlohmann::ordered_json + std::optional reproduces those semantics.
+using JsonMap = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: public Map<String, Object> readJson(String filePath)
+    std::optional<JsonMap> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;  // like FileReader's FileNotFoundException
+            }
+            JsonMap data = JsonMap::parse(reader);
+            // Gson can only produce a Map for a top-level JSON object;
+            // empty input, "null", arrays and scalars all end up as null.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;  // Java: catch (Exception e) { return null; }
+        }
+    }
+
+    // Java: public boolean writeJson(Map<String, Object> data, String filePath)
+    bool writeJson(const JsonMap& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;  // like FileWriter's IOException
+            }
+            writer << data.dump();  // Gson's default output is compact JSON
+            writer.close();         // try-with-resources close(); failure -> false
+            return !writer.fail();
+        } catch (...) {
+            return false;  // Java: catch (Exception e) { return false; }
+        }
+    }
+
+    // Java: public boolean processJson(String filePath, String removeKey)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonMap> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+}  // namespace org::example
+```
+
+This looks complete and faithful. One last sanity check on `parse(reader)`: `static basic_json parse(istream&)` — actually the signature is `parse(iotype& iop, parser_callback_t cb = nullptr, bool allow_exceptions = true, bool ignore_comments = false)`. Yes, parse from istream works, throws parse_error on invalid input by default. Good.
+
+Also note: parse from a stream where the stream has failbit set before reading (e.g., reading a directory fails immediately) — parse throws parse_error → caught. Good.
+
+Alright, output just the code block.
+</think>
+
+=== RAW ANSWER ===
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <system_error>
+
+#include <nlohmann/json.hpp>  // requires the nlohmann/json single header (Gson equivalent)
+
+namespace org::example {
+
+// Java's Map<String, Object> produced by Gson's fromJson(reader, Map.class) is a
+// LinkedTreeMap: JSON objects only, insertion-ordered, nullable.
+// nlohmann::ordered_json + std::optional reproduces those semantics.
+using JsonMap = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: public Map<String, Object> readJson(String filePath)
+    std::optional<JsonMap> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;  // file does not exist (or existence undeterminable)
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;  // like FileReader's FileNotFoundException -> null
+            }
+            JsonMap data = JsonMap::parse(reader);
+            // Gson with Map.class only yields a Map for a top-level JSON object;
+            // empty input, "null", arrays and scalars all end up as null in Java.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;  // Java: catch (Exception e) { return null; }
+        }
+    }
+
+    // Java: public boolean writeJson(Map<String, Object> data, String filePath)
+    bool writeJson(const JsonMap& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;  // like FileWriter's IOException -> false
+            }
+            writer << data.dump();  // Gson's default output is compact JSON
+            writer.close();         // mirrors try-with-resources close();
+            return !writer.fail();  // a failed write/flush/close -> false
+        } catch (...) {
+            return false;  // Java: catch (Exception e) { return false; }
+        }
+    }
+
+    // Java: public boolean processJson(String filePath, String removeKey)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonMap> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+}  // namespace org::example
+```
+
+=== TRANSLATED CODE (cpp) ===
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <system_error>
+
+#include <nlohmann/json.hpp>  // requires the nlohmann/json single header (Gson equivalent)
+
+namespace org::example {
+
+// Java's Map<String, Object> produced by Gson's fromJson(reader, Map.class) is a
+// LinkedTreeMap: JSON objects only, insertion-ordered, nullable.
+// nlohmann::ordered_json + std::optional reproduces those semantics.
+using JsonMap = nlohmann::ordered_json;
+
+class JSONProcessor {
+public:
+    // Java: public Map<String, Object> readJson(String filePath)
+    std::optional<JsonMap> readJson(const std::string& filePath) {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return std::nullopt;  // file does not exist (or existence undeterminable)
+        }
+        try {
+            std::ifstream reader(filePath);
+            if (!reader.is_open()) {
+                return std::nullopt;  // like FileReader's FileNotFoundException -> null
+            }
+            JsonMap data = JsonMap::parse(reader);
+            // Gson with Map.class only yields a Map for a top-level JSON object;
+            // empty input, "null", arrays and scalars all end up as null in Java.
+            if (!data.is_object()) {
+                return std::nullopt;
+            }
+            return data;
+        } catch (...) {
+            return std::nullopt;  // Java: catch (Exception e) { return null; }
+        }
+    }
+
+    // Java: public boolean writeJson(Map<String, Object> data, String filePath)
+    bool writeJson(const JsonMap& data, const std::string& filePath) {
+        try {
+            std::ofstream writer(filePath);
+            if (!writer.is_open()) {
+                return false;  // like FileWriter's IOException -> false
+            }
+            writer << data.dump();  // Gson's default output is compact JSON
+            writer.close();         // mirrors try-with-resources close();
+            return !writer.fail();  // a failed write/flush/close -> false
+        } catch (...) {
+            return false;  // Java: catch (Exception e) { return false; }
+        }
+    }
+
+    // Java: public boolean processJson(String filePath, String removeKey)
+    bool processJson(const std::string& filePath, const std::string& removeKey) {
+        std::optional<JsonMap> data = readJson(filePath);
+        if (!data.has_value()) {
+            return false;
+        }
+        if (data->contains(removeKey)) {
+            data->erase(removeKey);
+            return writeJson(*data, filePath);
+        }
+        return false;
+    }
+};
+
+}  // namespace org::example
