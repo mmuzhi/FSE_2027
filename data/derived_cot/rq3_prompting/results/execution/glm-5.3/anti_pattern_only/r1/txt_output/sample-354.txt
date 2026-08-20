@@ -1,0 +1,2248 @@
+=== PROMPT VARIANT ===
+r1
+
+=== PROMPT ===
+Here is some python code and the inputs passed into it.
+Determine the output by simulating the execution.
+
+Code: python
+def decode_linux(line, match):
+    perms, links, uid, gid, size, mtime, name = match.groups()
+    is_link = perms.startswith("l")
+    is_dir = perms.startswith("d") or is_link
+    if is_link:
+        name, _, _link_name = name.partition("->")
+        name = name.strip()
+        _link_name = _link_name.strip()
+    permissions = Permissions.parse(perms[1:])
+
+    mtime_epoch = _parse_time(mtime)
+
+    name = unicodedata.normalize("NFC", name)
+
+    raw_info = {
+        "basic": {"name": name, "is_dir": is_dir},
+        "details": {
+            "size": int(size),
+            "type": int(ResourceType.directory if is_dir else ResourceType.file),
+        },
+        "access": {"permissions": permissions.dump()},
+        "ftp": {"ls": line},
+    }
+    access = raw_info["access"]
+    details = raw_info["details"]
+    if mtime_epoch is not None:
+        details["modified"] = mtime_epoch
+
+    access["user"] = uid
+    access["group"] = gid
+
+    return raw_info
+Inputs: 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian', <re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>
+
+Try to avoid patterns like these:
+- turning execution simulation into algorithm discussion;
+- stepping back from a concrete trace into abstract reinterpretation;
+- replacing explicit values and state changes with guesses about what the code probably means.
+
+Answer using <ans></ans> tags only.
+
+=== REASONING ===
+<think>
+We need answer output of simulating execution. Need infer missing functions/classes? Code uses Permissions.parse, ResourceType, _parse_time, unicodedata. Inputs: line and match object. Need determine output? We have partial match? Need simulate. The match object span=(0,85), match='lrwxrwxrwx    1 0        0              19 Jan 18'. Wait match.groups? Need know regex? It says match object match string only first 85? Hmm.
+
+Need parse line. Need output raw_info dictionary. Need know Permissions.parse, ResourceType values, _parse_time behavior. Need infer from code maybe ftputil? This looks from fs_ftp? Need identify implementation. decode_linux perhaps in `filesystem`? Let's search memory.
+
+This code resembles "fs.ftp_parse"? Let me recall. There is Python "fs" library? Function `decode_linux(line, match)` maybe in `fs/ftpfs.py` or `fs/protocols/ftp`? Let's recall exactly. In PyFilesystem2, `fs/ftpfs.py` includes LS parsing with `_parse_linux`, `_parse_windows`? Maybe classes.
+
+Let's identify. Code:
+```
+def decode_linux(line, match):
+    perms, links, uid, gid, size, mtime, name = match.groups()
+    is_link = perms.startswith("l")
+    is_dir = perms.startswith("d") or is_link
+    if is_link:
+        name, _, _link_name = name.partition("->")
+        name = name.strip()
+        _link_name = _link_name.strip()
+    permissions = Permissions.parse(perms[1:])
+    mtime_epoch = _parse_time(mtime)
+    name = unicodedata.normalize("NFC", name)
+    raw_info = {
+      "basic": {"name": name, "is_dir": is_dir},
+      "details": {
+         "size": int(size),
+         "type": int(ResourceType.directory if is_dir else ResourceType.file),
+      },
+      "access": {"permissions": permissions.dump()},
+      "ftp": {"ls": line},
+    }
+    access=...
+    details=...
+    if mtime_epoch is not None:
+      details["modified"] = mtime_epoch
+    access["user"] = uid
+    access["group"] = gid
+    return raw_info
+```
+Could be from `fs.ftp_parse`? Need know `Permissions.parse` dump output. It parses a 9-char permissions string e.g. `rwxrwxrwx`. Need know representation. Perhaps `st_mode` integer? In PyFilesystem2, class Permissions? Let's search memory internally.
+
+PyFilesystem2 has `fs.permissions.py`:
+```
+class Permissions:
+    def __init__(self, mode=0o777, disable_setuid=False, disable_setgid=False, sticky=False):
+        self._mode = mode & 0o777
+        self._disable_setuid = ...
+...
+    @classmethod
+    def parse(cls, s):
+        """Parse a permissions string."""
+        if len(s) != 9:
+            raise ValueError("Permissions string must be 9 characters long")
+        permissions = cls(0)
+        for i, c in enumerate(s):
+            if c not in "-rwx":
+                raise ValueError(...)
+            if c != "-":
+                permissions._mode |= 1 << (8 - i)
+        return permissions
+    def dump(self):
+        return self._mode
+```
+Maybe dump returns integer mode. Need exact.
+
+Wait `perms[1:]` for lrwxrwxrwx => `rwxrwxrwx`, parse -> mode 0o777, dump -> 511 maybe. Need confirm.
+
+`ResourceType` in PyFilesystem2 likely enum:
+```
+class ResourceType(IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+So directory if link => int 1.
+
+`_parse_time`? Need know for "Jan 18  2006" vs "Jan 18 17:34"? Need infer. Match group mtime maybe "Jan 18  2006"? Input match object span 0,85 match string only includes through "Jan 18" (because match repr maybe truncates? Actually `match='lrwxrwxrwx    1 0        0              19 Jan 18>'` no, repr of match shows `match='...'` full matched substring, maybe truncated by repr? Let's check re.Match repr: `<re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18'>`; match property is entire matched substring. It shows span 85, string length? Let's count. It might be full match truncated to "Jan 18" because regex doesn't match year? But then group mtime may include "Jan 18  2006"? Need inspect.
+
+Input line length? Let's count. `lrwxrwxrwx` 10 + 4 spaces? Let's compute. But match span 85 maybe from start to just before " 2006"? If match string length is 85, and repr match string `'lrwxrwxrwx    1 0        0              19 Jan 18'` length maybe 54, not 85. Wait maybe repr includes only first? No Python re.Match repr in 3.7 includes full matched string, if too long? Let's recall: `<re.Match object; span=(0, 5), match='hello'>`. It includes exact match. If span=(0,85), match string must length 85. But displayed string length appears maybe 54; could because contains nonprinting spaces? no. Let's count line length: 
+`lrwxrwxrwx` 10
+spaces before 1: maybe 4 =14
+`1`=15
+space=16
+`0`=17
+spaces 8? `0        0`? Let's index. Line: 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'
+Count segments:
+perms 10
+4 spaces -> 14
+links "1" ->15
+space ->16
+uid "0" ->17
+8 spaces ->25? Actually between 0 and 0 maybe 8
+gid "0" ->26
+14 spaces ->40?
+size "19" ->42
+space ->43
+mtime "Jan 18  2006" length 12? ->55
+space ->56
+name "debian -> ./pub/mirror/debian" length? 6+3+20? `./pub/mirror/debian` length 19? total 28? ->84 maybe. Line length maybe 84/85. So full line length 84? But match span 85 maybe close to full. But match repr truncated? Let's count carefully.
+
+Need maybe regex has 7 groups, full match includes maybe just start through name. The match object repr match string should show full matched portion. The given match string stops at "Jan 18", suspicious maybe because actual matched substring is "lrwxrwxrwx    1 0        0              19 Jan 18" and length maybe 44, not 85. Unless `span=(0, 85)` includes through `debian ->`? But match property repr in Python? It shows only "match='lrwxrwxrwx    1 0        0              19 Jan 18'>" because line maybe broken? Wait in prompt:
+`<re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>`
+It is missing closing quote? Actually there is a quote before >? It says `match='lrwxrwxrwx    1 0        0              19 Jan 18>` no trailing `'`. In user prompt:
+`<re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>`
+Maybe after Jan 18 there's a `'` before >? It is `match='lrwxrwxrwx    1 0        0              19 Jan 18>` maybe typo. Hmm.
+
+Need produce output by simulating.
+
+Need know exact inputs: line and match. Could be from test case. Maybe line is from Linux FTP LIST with symlink and date no time. The regex match groups likely: perms, links, uid, gid, size, mtime, name. We can infer groups:
+- perms = "lrwxrwxrwx"
+- links = "1"
+- uid = "0"
+- gid = "0"
+- size = "19"
+- mtime = "Jan 18  2006"
+- name = "debian -> ./pub/mirror/debian"
+
+Need determine _parse_time("Jan 18  2006"). Could output None or epoch timestamp? Let's inspect actual `_parse_time` implementation. It may be in `fs/ftp_parse.py`? Need know.
+
+Let's identify code source. Search memory: PyFilesystem2 has module `fs/ftp_parse.py`? I know there is `ftp_parse.py` in Pyfilesystem? It has LinuxParser, WindowsParser? Actually in fs.opener? Hmm.
+
+Let's recall from `fs/ftpfs.py`: It uses `ftputil`? There is `parse_ftp` module:
+```
+import unicodedata
+from .enums import ResourceType
+from .permissions import Permissions
+from .utils import datetime_to_epoch
+...
+```
+Maybe `_parse_time`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+       time_struct = time.strptime(mtime, "%b %d %H:%M")
+       tm_year = datetime.now().year
+       ...
+    else:
+       time_struct = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(time_struct)
+```
+Need exact.
+
+Need output likely dictionary. Need include permissions dump. Need identify permissions.dump format.
+
+Let's search memory of PyFilesystem2. There is `fs/ftp_parse.py` maybe:
+```
+LINUX_FORMAT = re.compile(
+    r"^(?P<perms>[\w-]+)\s+(?P<links>\d+)\s+(?P<uid>\w+)\s+(?P<gid>\w+)\s+"
+    r"(?P<size>\d+)\s+(?P<mtime>\w+\s+\d+\s+[\w:]+)\s+(?P<name>.*)$"
+)
+```
+But line uses "Jan 18  2006" (year not \w:), so maybe `[\w:]+` includes 2006. Good. But if mtime group maybe `Jan 18  2006`, name group after. Full match length maybe line length. Need regex may not greedily include `->`? We'll infer.
+
+`Permissions.parse`:
+In PyFilesystem2, permissions object maybe from `fs.permissions`. Let's recall code. I have seen:
+```
+class Permissions:
+    """A class for storing POSIX permissions."""
+    def __init__(self, mode=0o777):
+        self._mode = mode
+    @staticmethod
+    def parse(permission_str):
+        """Parse a permissions string."""
+        mode = 0
+        for offset, char in enumerate(permission_str):
+            bit = 1 << (8 - offset)
+            if char == "r" and offset % 3 == 0:
+                mode |= bit
+            elif char == "w" and offset % 3 == 1:
+                mode |= bit
+            elif char == "x" and offset % 3 == 2:
+                mode |= bit
+        return Permissions(mode)
+    def dump(self):
+        return oct(self._mode) maybe?
+```
+Hmm.
+
+Need inspect from memory. In fs2, `fs.info.Info` uses `access.permissions` integer? Let's recall examples. PyFilesystem2 info dictionaries:
+```
+{'basic': {'name': 'foo.txt', 'is_dir': False},
+ 'details': {'accessed': 1586596759, 'modified': 1586596759, 'size': 37, 'type': 2},
+ 'access': {'gid': 0, 'group': 'root', 'permissions': 420, 'uid': 0, 'user': 'root'}}
+```
+I remember access permissions is an integer. For OSFS, `permissions` might be a `Permissions` object dumped to int, like `0o644` -> 420. In info JSON maybe permissions is int.
+
+Let's recall `fs.permissions`:
+```
+class Permissions(object):
+    """Represents POSIX permissions.
+    """
+    def __init__(self, mode=0):
+        self.mode = mode
+    def dump(self):
+        return self.mode
+    @classmethod
+    def parse(cls, s):
+        mode = 0
+        for c in s:
+            mode <<= 1
+            if c != "-":
+                mode |= 1
+        return cls(mode)
+```
+Maybe dump returns int.
+
+But need exact for "rwxrwxrwx": 0o777 => 511. If dump returns string? Need verify.
+
+`_parse_time`: Need know output timestamp for Jan 18 2006. Could be `1137542400`? Let's compute. But depends timezone. Linux `ls` dates often UTC? FTP server may provide date with no timezone. Function likely uses `time.mktime` local time or `calendar.timegm`. Need know. Need maybe output is None for old dates? Let's investigate.
+
+I recall in fs2 `ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        time_str = datetime.now().year + ' ' + mtime
+        st = time.strptime(time_str, "%Y %b %d %H:%M")
+        return time.mktime(st)
+    else:
+        st = time.strptime(mtime, "%b %d %Y")
+        return time.mktime(st)
+```
+Could be. But with environment? For simulation, they expect maybe no modified? The `if mtime_epoch is not None`. `_parse_time` may return None if cannot parse `Jan 18  2006`? Let's search memory.
+
+Maybe `_parse_time` in `ftp_parse.py`:
+```
+def _parse_time(mtime):
+    """Convert date in format e.g. 'Feb 27  2017' or 'Feb 27 12:29' to timestamp."""
+    now = datetime.now()
+    if re.match(r"\w{3} \d{1,2} \d{2}:\d{2}", mtime):
+        dt = datetime.strptime(mtime, "%b %d %H:%M").replace(year=now.year)
+    else:
+        dt = datetime.strptime(mtime, "%b %d %Y")
+    return dt.timestamp()
+```
+If current local timezone? Hmm.
+
+But we need likely output can include a timestamp. Let's examine line date: "Jan 18  2006" (there are two spaces between day and year). Python `strptime` `%b %d %Y` can parse multiple spaces? Let's recall `time.strptime("Jan 18  2006", "%b %d %Y")` with whitespace in format one space matches any whitespace? In Python, whitespace in format matches zero or more whitespace? Let's test mentally. `datetime.strptime("Jan 18  2006", "%b %d %Y")` should parse yes? I think Python's strptime uses regex where whitespace matches `\s*`, so yes.
+
+The match object "span=(0,85)" maybe maybe from test in ftputil? Let's identify exact function from another library maybe "fs.ftpfs" uses static method.
+
+Let's search internal memory by code snippets. I have seen in `fs/ftp_parse.py` from PyFilesystem2:
+```
+def _parse_time(time_str):
+    """Convert a time string as found in FTP LIST responses to a timestamp.
+    """
+    if ":" in time_str:
+        # Assume current year
+        time_str = f"{datetime.now().year} {time_str}"
+        timestamp = time.mktime(time.strptime(time_str, "%Y %b %d %H:%M"))
+    else:
+        timestamp = time.mktime(time.strptime(time_str, "%b %d %Y"))
+    return timestamp
+```
+Maybe.
+
+But output may be deterministic? If current year? Not for year case. Timezone? On typical environment local timezone maybe UTC? But not specified. Could be expected to compute in local? Let's inspect actual code from Pyfilesystem2 to know timestamp conversion.
+
+Search memory of pyfilesystem2 source. There is `fs/ftp_parse.py` maybe includes:
+```
+import re
+import time
+from datetime import datetime
+from typing import Optional
+from .enums import ResourceType
+from .permissions import Permissions
+
+...
+
+def _parse_time(mtime):
+    if ":" in mtime:
+        # Many FTP servers return a time with no year, so we assume the year
+        # of the current date.
+        year = datetime.now().year
+        mtime = f"{year} {mtime}"
+        tm = time.strptime(mtime, "%Y %b %d %H:%M")
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+Would return local epoch. But perhaps output tests patch time? Hmm.
+
+Let's compute Jan 18 2006 00:00 local (assuming UTC?) If `time.mktime` uses local timezone. If simulation environment likely UTC? Maybe answer can use expected timestamp from code if uses calendar.timegm. Need find.
+
+Let's google brain: PyFilesystem2 has `ftp_parse.py` copied from `fs.ftpfs`. I recall code:
+```
+def _parse_time(mtime):
+    try:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        # mktime can raise OverflowError if the year is out of range
+        return time.mktime((datetime.now().year, *tm[1:]))
+    except ValueError:
+        tm = time.strptime(mtime, "%b %d %Y")
+        return calendar.timegm(tm)
+```
+Maybe.
+
+Let's identify exact code by test cases. This line might be from tests for PyFilesystem2's ftp parser. Maybe expected `raw_info` in test has:
+```
+{
+    "basic": {"name": "debian", "is_dir": True},
+    "details": {"modified": 1137580800, "size": 19, "type": 1},
+    "access": {"group": "0", "user": "0", "permissions": 511},
+    "ftp": {"ls": "..."},
+}
+```
+Timestamp maybe 1137580800? Let's compute.
+
+Jan 18 2006 00:00 UTC epoch: Need compute. 2006-01-01 UTC epoch 1136073600. Jan 18 is +17 days = +1,468,800 => 1137542400. Wait 2006-01-01 to Jan18: Jan 1 day index 0? Jan 18 00:00 = +17*86400, yes 1136073600 + 1468800 = 1137542400. I earlier said 1137542400. But 1137580800 is Jan18 11? Let's calculate: 1137542400 yes. If time.mktime local UTC+? maybe 1137542400 for UTC. If local -? Might be 1137560400 etc.
+
+Let's verify 2006-01-01 epoch: 2004 leap? 2005 epoch 1104537600. 2006 1136073600. yes.
+
+Need see if `_parse_time` returns `datetime` or int? It likely returns epoch float? `time.mktime` returns float, then in raw_info maybe assigned directly? In code:
+```
+details["modified"] = mtime_epoch
+```
+Could be float 1137542400.0. But many info details modified is int? Maybe `time.mktime` returns float, but they convert to int? Let's inspect `_parse_time` maybe returns `datetime_to_epoch(dt)` int.
+
+Need know `Permissions.parse` dump. Could be 511.
+
+Need understand match groups. The line: `'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'`. There is a match object span 0,85, match probably includes entire line? Let's count line length to see. It says span=(0, 85) but perhaps line length 85. Need count precisely.
+
+Let's count line. Use manual:
+Segment "lrwxrwxrwx" 10.
+Then spaces: in prompt after perms: `    ` 4 -> total 14.
+`1` ->15.
+space ->16.
+`0` ->17.
+Then before next `0`: `        `? Let's count between uid and gid. Prompt: `0        0` maybe 8 spaces. Then total 25 before gid, +0=26.
+Then after gid before size: `              ` maybe 14 spaces. Total 40 before size, size `19` ->42.
+Space ->43.
+`Jan` 3 ->46
+space ->47
+`18` ->49
+two spaces? ->51
+`2006` ->55
+space ->56
+`debian` 6 ->62
+space ->63
+`->` 2 ->65
+space ->66
+`./pub/mirror/debian`: count `.`1 `/`1=2 `pub`3=5 `/`6 `mirror`6=12 `/`13 `debian`6=19. So 66+19=85. Yes line length 85. So match span 0,85 includes entire line. Good. The match repr in prompt should include full match line but maybe omitted? Wait displayed match stops at "Jan 18" because not full? Maybe due to there is a newline? No. But count full line length 85. So span 0,85 is full line. But match repr should include entire match line including 2006 debian -> ..., not truncated. The prompt has `match='lrwxrwxrwx    1 0        0              19 Jan 18>` likely maybe due to line break or issue. But since span 85, groups likely full.
+
+Need know regex exactly. Maybe match.groups yields `perms, links, uid, gid, size, mtime, name`. Because match spans full. Could match with regex:
+```
+LINUX_RE = re.compile(
+    r"^(?P<perms>[-dl][rwxstST-]+)\s+(?P<links>\d+)\s+(?P<uid>\S+)\s+(?P<gid>\S+)\s+"
+    r"(?P<size>\d+)\s+(?P<mtime>.+?)\s+(?P<name>.*)$"
+)
+```
+Need mtime maybe "Jan 18  2006" and name "debian -> ./pub/mirror/debian". The `.+?`? Usually pattern for mtime might `\w+ \d+ [\w:]+` exact; then no ambiguity. Let's not assume name could be "Jan 18  2006 debian"? But code groups named.
+
+Could match object "match='lrwxrwxrwx    1 0        0              19 Jan 18" perhaps because regex stops before year if mtime group is Jan 18 only? But span then 0,? let's count up to Jan18 length maybe 49. Not 85. So impossible unless the match property display is truncated by prompt for readability, but not in real Python. Maybe they supplied a malformed match object representation manually; but span indicates entire line. Maybe match string in repr truncated to first 50? Does Python re.Match repr truncate? Let's verify. Python re.Match object __repr__ code:
+```
+def __repr__(self):
+    return "<re.Match object; span=(%d, %d), match=%r>" % (self.start(), self.end(), self.group())
+```
+No truncation. It would show all 85 chars, including `'2006 debian -> ./pub/mirror/debian'`. The prompt might have omitted due to "match='... Jan 18>" accidentally? Wait it says "Inputs: 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian', <re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>"
+
+Maybe because after `Jan 18` there is a newline? No. They may have intended to show `match='lrwxrwxrwx    1 0        0              19 Jan 18'` and span should be 50 but they wrote 85 by mistake. But line length 85. Which is more likely? In these tasks, they provide code and inputs, with `match` object string from actual `re.match`, not necessarily full because regex only matched part. If regex matched only part, end not 85. Unless line length 50? But we counted full line length 85. Could span=(0,85) be not end but group count? No re.Match repr span tuple start/end. It can't be group count. So likely prompt accidentally truncated the match string? Or maybe after `Jan 18` the repr includes only first 50 chars due to `reprlib`? I don't think Python does. Hmm.
+
+Maybe they constructed the match object by regex matching a different string? If full line length 85, but regex pattern matched only prefix length 49, span would be (0,49). Not (0,85). If regex matched full line, repr should include full line. The inconsistency might be from the "match" repr in Python with a very long string? Need verify. Does Python truncate the `match=` value in re.Match repr? Let's recall actual outputs:
+```
+>>> re.match("a+", "a"*100)
+<re.Match object; span=(0, 100), match='aaaaaaaaaa...'>
+```
+Wait! Python may truncate repr of re.Match? Let's recall. I have seen:
+```
+>>> re.match('a', 'abc')
+<re.Match object; span=(0, 1), match='a'>
+```
+For long string, I don't remember seeing truncation. Let's check CPython source `sre`? `_sre` `pattern_match`? The repr of match object implemented in Python? It may use `_pyre`? Could be:
+```
+def __repr__(self):
+    return "<re.Match object; span=(%d, %d), match=%r>" % (
+        self.pos, self.endpos, self.string[self.pos:self.endpos])
+```
+No truncation. But perhaps CPython 3.11 uses `reprlib.Repr` for match? Let's recall seeing:
+```
+<re.Match object; span=(0, 5), match='hello'>
+```
+No truncation.
+Could maybe if string contains non-ASCII? no.
+
+Let's not dwell. We can answer output based on groups and line.
+
+Need know exact `_parse_time` for old year. Could maybe returns `None` because mtime group from regex only "Jan 18" if regex didn't include year? But code uses `_parse_time(mtime)`, maybe with "Jan 18" no year/time; would parse? Maybe returns None. But match span full suggests mtime "Jan 18  2006". The line and code likely from a test where regex parse full. Let's see if regex for Linux format uses mtime pattern `(?P<mtime>\w+ \d+ \d+:\d+)` requiring time, then this line with year would not match full; maybe no match? But given match object span 0,85, they might use a different regex that accepts year? Let's identify actual regex in `fs.ftp_parse` maybe:
+```
+_LINUX_LIST = re.compile(
+    r"^(?P<perms>.+?)\s+(?P<links>\d+)\s+(?P<uid>\S+)\s+(?P<gid>\S+)\s+"
+    r"(?P<size>\d+)\s+(?P<mtime>\S+\s+\S+\s+\S+)\s+(?P<name>.*)$"
+)
+```
+mtime is three chunks. Then "Jan 18  2006" due whitespace after 18 and 2006.
+
+Let's search memory by examples in PyFS FTP parser. It might support:
+- Unix: `drwxr-xr-x   2 ftp      ftp          4096 Mar 09 09:30 dir`
+- Unix with year: `lrwxrwxrwx   1 ftp      ftp            18 Jan 18  2006 link -> target`
+The mtime pattern might be `\w+ \d+ \d+:\d+|\w+ \d+ \d{4}`. It may capture the entire date.
+
+Need compute permissions object.
+
+Let's inspect `fs.permissions` mentally. From docs:
+```
+from fs.permissions import Permissions
+perms = Permissions.parse("rwxr-x---")
+perms.dump() # 0o750
+perms.chmod("g+w")
+```
+`dump()` maybe returns `int`.
+For symlink "lrwxrwxrwx": perms[1:] = "rwxrwxrwx", mode 0o777 = 511.
+
+`access["user"] = uid`, `access["group"] = gid`: uid = "0" and gid = "0" strings, not ints. If regex groups. So output includes strings.
+
+`name`: because is_link, partition on "->" returns ("debian ", "->", " ./pub/mirror/debian"), strip => "debian". `unicodedata.normalize("NFC", "debian")` -> "debian" (ASCII unchanged).
+
+`is_link=True`, `is_dir=True`. `details["type"]` = int(ResourceType.directory) = 1. `details["size"]=int("19")=19.
+
+`mtime_epoch`: Need exact.
+
+Let's compute if `_parse_time` returns epoch as int? Could be 1137580800? Let's find exact. Need perhaps answer can include "modified": 1137580800? Let's derive from source.
+
+Potential source. Let's try to reconstruct `fs.ftp_parse`.
+
+I remember a PyFilesystem2 file `fs/ftp_parse.py` from version 2.4.12. It has:
+```
+import calendar
+import time
+
+def _parse_time(mtime):
+    if ":" in mtime:
+        date = time.strptime(mtime, "%b %d %H:%M")
+        # many FTP servers use a 6-month threshold, but we'll use current year
+        now = time.localtime()
+        year = now.tm_year
+        return calendar.timegm((year, *date[1:]))
+    else:
+        date = time.strptime(mtime, "%b %d %Y")
+        return calendar.timegm(date)
+```
+Maybe.
+
+Let's search memory snippets. PyFS uses `calendar.timegm` in FTP? Because FTP server returns times in server timezone unknown; they may use UTC? Hmmm.
+
+Maybe code from `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    try:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        # Assume current year
+        tm = tm[:0] + (datetime.now().year,) + tm[1:]
+        return time.mktime(tm)
+    except ValueError:
+        pass
+    try:
+        tm = time.strptime(mtime, "%b %d %Y")
+        return time.mktime(tm)
+    except ValueError:
+        return None
+```
+Could have no calendar import. Need know.
+
+Let's look up PyFilesystem2 FTPFS info behavior. It likely wants POSIX timestamps in local time? `time.mktime` from struct_time assumes local timezone. But FTP servers don't include timezone; using local time could be inaccurate. They might use `calendar.timegm` to treat it as UTC? What did they choose? Need evidence.
+
+I remember seeing a function in `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # If it has a time, then it is within the last 6 months, so the year is omitted.
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.localtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+The docs might mention "returns a timestamp in local time" because FTP date strings have no timezone. The code likely uses `time.mktime`.
+
+But these tasks probably expect deterministic output maybe from execution under UTC. Could mention timestamp if using `time.mktime` in local timezone. But they ask "Determine the output by simulating execution." Need provide final dict. We can perhaps state "assuming UTC/local timezone, modified is ..." But final should be exact.
+
+Let's inspect source by memory from actual PyFS. Maybe `_parse_time` uses:
+```
+return int(time.mktime(time.strptime(mtime, "%b %d %Y")))
+```
+Actually maybe `time.mktime` returns float; they convert to int? Search memory of "def _parse_time(mtime)" exact. It could be in `fs/ftp_parse.py`:
+```
+def _parse_time(mtime: str) -> Optional[float]:
+    """Convert a MTIME string to an epoch."""
+    if ":" in mtime:
+        mtime = f"{datetime.now().year} {mtime}"
+        st = time.strptime(mtime, "%Y %b %d %H:%M")
+    else:
+        st = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(st)
+```
+No int. In info, `modified` may be float. Does FS info require timestamps as int? Let's recall PyFilesystem2's `make_info` etc. In OSFS:
+```
+"modified": int(st.st_mtime)
+```
+Maybe but can be float? In `Info` docs, timestamps are "seconds since epoch, can be int or float". So no conversion.
+
+If `time.mktime` with UTC local yields float 1137542400.0. But if using `calendar.timegm`, returns int 1137542400. Need determine.
+
+Let's search memory of imports in fs/ftp_parse.py. It imports `time`, maybe not `calendar`. The code snippet given from decode_linux includes only one function; imports not shown. `_parse_time` maybe from same module. If it used calendar, imports calendar. What is typical? A helper:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (datetime.now().year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+This uses time. Since `_parse_time` named with underscore. It may use `time.mktime`. More likely because simple.
+
+Need maybe not include modified if parse fails due to mtime group not expected. Let's investigate mtime pattern. There is a subtle issue: `_parse_time` only handles "Feb 27  2017" or "Feb 27 12:29"; `mtime` group maybe "Jan 18" (if regex captures only first two tokens) then `_parse_time` returns None? But line includes date year. Need know.
+
+Let's inspect possible regex from source. Could be:
+```
+LINUX_RE = re.compile(
+    r"^(?P<perms>[\-dl][\w\-]+)\s+(?P<links>\d+)\s+"
+    r"(?P<uid>\w+)\s+(?P<gid>\w+)\s+(?P<size>\d+)\s+"
+    r"(?P<mtime>\w+\s+\d+\s+\d+)\s+(?P<name>.*)$"
+)
+```
+For Jan 18 2006: mtime maybe "Jan 18 2006" due `\s+`; name "debian -> ./pub/mirror/debian". Good.
+
+Could output `access` dictionary ordering: in Python 3.7 insertion order. Initial access contains permissions, then `user`, `group`. The raw_info keys order as inserted: basic, details, access, ftp. If final output printed by `return raw_info`, repr includes order:
+```
+{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': ...}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}
+```
+Need decide if permissions dump is 511 or something else.
+
+Let's examine `Permissions.parse(perms[1:])` details. For "rwxrwxrwx", mode 0o777. But what about `dump()`? Could return a 9-char permissions string? Let's check docs. The name `dump` maybe means "dump permissions into an info dict", perhaps returns dict with owner, group, other? Let's recall PyFilesystem2 `Permissions` class.
+
+Docs maybe:
+```
+>>> permissions = Permissions.parse("rwxr-xr-x")
+>>> permissions.mode
+0o755
+>>> permissions.dump()
+'755'
+```
+Maybe dump returns string? Need be precise.
+
+Let's search memory from using PyFilesystem2. I saw info:
+```
+info["access"]["permissions"] # 436
+```
+Maybe docs:
+```
+permissions = Permissions(0o644)
+permissions.dump()  # 'rw-r--r--'
+```
+Hmm, "parse" from string, "dump" to string maybe symmetrical. Let's investigate.
+
+In PyFilesystem2, `fs.permissions.Permissions` might have methods:
+- `__repr__`
+- `__str__`: returns POSIX permission string
+- `chmod`
+- `parse` classmethod
+- `dump`
+What does dump do? Let's recall docs:
+```
+class Permissions:
+    """Represents a permissions setting.
+    """
+    def __init__(self, mode=0o777):
+        self._mode = mode
+    @classmethod
+    def parse(cls, permissions):
+        ...
+    def dump(self):
+        """Get the mode as a string."""
+        mode = self._mode
+        permissions = ''
+        for bits in (0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001):
+            ...
+        return permissions
+```
+Maybe `dump()` returns string. But in `raw_info["access"]["permissions"] = permissions.dump()`, info expects something. Could be string "rwxrwxrwx"? Maybe. Let's search memory.
+
+I used PyFilesystem2:
+```
+from fs.permissions import Permissions
+perms = Permissions(0o755)
+perms.mode  # 493
+perms.dump()  # '755'?
+```
+Maybe there is a `Permissions` class in fs that stores permissions as integer and has `dump()` returns the integer; `parse` converts permission string? Hmm.
+
+Let's recall from docs of PyFilesystem2:
+- `fs.info.Info` has `get("access", "permissions")` maybe returns a `Permissions` object? In `OSFS.getinfo`, code:
+```
+permissions = Permissions(st.st_mode)
+...
+"access": {
+   "uid": st.st_uid,
+   "gid": st.st_gid,
+   "user": username,
+   "group": groupname,
+   "permissions": permissions.dump(),
+}
+```
+`permissions.dump()` maybe int because JSON serializable? But if parse/dump symmetrical maybe string.
+I remember in filesystems, access permissions is often a `Permissions` object? Let's search memory examples:
+```
+>>> home_fs.getinfo("/", namespaces=["access"])
+{'basic': {'name': '', 'is_dir': True},
+ 'details': {'type': 2, 'accessed': ..., 'modified': ..., 'size': 96},
+ 'access': {'uid': 1000, 'gid': 1000, 'user': 'will', 'group': 'will', 'permissions': 16877}}
+```
+No, for OSFS maybe permissions is the full `st_mode` (e.g. 16877 for directory), not just permission bits? Hmm.
+
+Actually in OSFS:
+```
+permissions = Permissions(st.st_mode)
+```
+Maybe `Permissions` constructor masks bits; dump returns int mode? For directory 0o40755, `st.st_mode & 0o7777` = 0o755 (493). Does info show `permissions`: 493 or 16877? I recall seeing `permissions`: 511 for `/`? Let's think.
+
+In POSIX stat, mode includes file type bits and permission bits. PyFS `Permissions` might parse `st_mode` and include file type? No, class likely only permissions bits.
+
+`Permissions.parse(perms[1:])` from "rwxrwxrwx" likely yields `Permissions(mode=511)`, dump maybe returns "rwxrwxrwx"? But if it stores as integer, dump likely returns integer. Let's look at class method names. If `parse` takes a string and returns a `Permissions` object, then `dump` might be expected to return an integer? "dump" in FS Info means "convert to raw info object", not necessarily string. Hmm.
+
+Let's search memory of code. I vaguely remember:
+```
+class Permissions:
+    def __init__(self, mode: int = 0o777) -> None:
+        self._mode = mode
+    def __int__(self):
+        return self._mode
+    @classmethod
+    def parse(cls, permissions: str) -> "Permissions":
+        mode = 0
+        for offset, c in enumerate(permissions):
+            mode <<= 1
+            if c != "-":
+                mode += 1
+        return cls(mode)
+    def dump(self) -> int:
+        return self._mode
+```
+Maybe parse converts "rwxr-xr-x" to 755. `dump` returns integer. The method `__str__` might produce string.
+
+Let's search memory: I read `fs.permissions` docs maybe:
+```
+>>> permissions = Permissions(0o644)
+>>> str(permissions)
+'rw-r--r--'
+>>> permissions.dump()
+'644'
+```
+No.
+
+Let's identify from `Permissions.parse(perms[1:])` in `decode_linux`. If `dump` returned a string equal to the input, then `permissions.dump()` would be "rwxrwxrwx"; if it returns octal string "777"; if int 511. Which one likely used in info? Let's recall PyFS info schema. The `access` namespace fields likely:
+- `uid`: int
+- `gid`: int
+- `user`: str
+- `group`: str
+- `permissions`: int
+I have seen in docs:
+```
+info = my_fs.getinfo("example.txt", namespaces=["access"])
+info.permissions
+```
+Maybe `Permissions` object can be returned: `info.permissions` property? Hmm.
+
+PyFilesystem2 `Info` has helper:
+```
+permissions = Permissions(int(self.get("access", "permissions")))
+```
+No.
+
+Let's search memory from source `fs/info.py`:
+```
+def make_info(basic, details=None, access=None, link=None, ftp=None):
+```
+No.
+
+Maybe in info, `permissions` in access is a string, e.g. "rwxr-xr-x". Because `Permissions.parse` from `ls` already has string; dump might convert to an integer? In FS docs, they talk "permissions as an integer (e.g. 0o755)"? Let's recall.
+
+I used PyFilesystem2 in projects. `my_fs.getinfo(path, namespaces=['access'])['access']['permissions']` maybe returns an integer like 511. I think yes. For memory FS, default permissions are `0o644` and info access includes `permissions`: 420. This rings true. `Permissions` object can be initialized from integer and dump to integer. `Permissions.parse` converts permission string to `Permissions`; `dump` returns `int`.
+
+Let's verify with examples: A file with mode `0o644` in OSFS info access maybe `permissions`: 420. I remember seeing output:
+```
+{'basic': {'name': 'tmp', 'is_dir': True}, 'details': {'type': 1, 'created': None, 'modified': None, 'accessed': None, 'size': 0, 'metadata_changed': None}, 'access': {'uid': None, 'gid': None, 'user': None, 'group': None, 'permissions': 511}}
+```
+Yes, memory FS returns permissions integer. Thus 511.
+
+Need know Resource type enum value. PyFilesystem2 `ResourceType` maybe not 1? Let's verify. In docs, `ResourceType` enumeration:
+```
+class ResourceType(IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    character = 2
+    block_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+Maybe `directory = 2`? Let's recall. PyFS has `ResourceType` enum values from stat:
+```
+unknown = -1
+file = 0
+directory = 1
+block_special_file = 2
+character_special_file = 3
+fifo = 4
+socket = 5
+symlink = 6
+```
+Actually POSIX `stat.S_IFMT`: file=32768 (0o100000), dir=16384, char=8192, block=24576, fifo=4096, link=40960, socket=49152. But PyFS uses type enum in `details` maybe values:
+```
+0 unknown
+1 file
+2 directory
+3 link
+...
+```
+Need confirm. Let's search memory. I used `fs.enums.ResourceType` in PyFS:
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    symlink = 2
+    block_special_file = 3
+    character_special_file = 4
+    fifo = 5
+    socket = 6
+```
+Hmm maybe. Need exact for output.
+
+The code uses `ResourceType.directory if is_dir else ResourceType.file`. If symlink considered directory due `is_link`, type will be directory. So value only directory. Need know directory int. Could be 1 or 2? Let's look up PyFilesystem2. I recall from docs:
+```
+fs.enums.ResourceType.file == 1
+fs.enums.ResourceType.directory == 2
+fs.enums.ResourceType.symlink == 3
+fs.enums.ResourceType.block_device == 4
+...
+```
+No, maybe because constants in file `fs/enums.py`:
+```
+class ResourceType(IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+This is same as S_IF values >> 13? Let's compute: file=8, dir=4, char=2, block=6, fifo=1, sock=12, symlink=10 if >>13; not same. But many libs use `stat` file type bits shifted. In PyFS, maybe type int uses `stat.S_IFREG` etc? Let's recall docs output from `getinfo` for file:
+```
+'details': {'type': 2, 'accessed': 1670331848, 'modified': 1670331848, 'size': 0, 'created': 1670331848, 'metadata_changed': ...}
+```
+In OSFS, for a file, type is `2`? Hmm. Let's investigate.
+
+I have seen PyFilesystem2 `ResourceType` docs:
+```
+class fs.enums.ResourceType(value)
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+It sounds plausible and matches "type" in archive? Let's see.
+
+In filesystem specs, resource type constants may use:
+```
+ResourceType.file = 0
+ResourceType.directory = 1
+ResourceType.symlink = 2
+```
+Maybe more likely because C enum begins file=0, dir=1. I recall using `fs.enums.ResourceType.directory` equals 1. A directory info in PyFS often `'type': 2`? Wait for `OSFS.getinfo('/')` maybe details type 2? Let's remember from docs example:
+```
+>>> print(home.getinfo("/").raw)
+{
+ 'basic': {'name': '', 'is_dir': True},
+ 'details': {'type': 2, 'accessed': ..., 'modified': ..., 'size': 4096},
+ 'access': {'uid': 1000, 'gid': 1000, ...}
+}
+```
+Maybe because OSFS maps `ResourceType.directory` to `stat.S_IFDIR`? Let's see. In PyFS details `type` might be an integer equal to `st_mode` file type, e.g. `stat.S_IFDIR` = 16384? But docs examples show `type: 2`? Hmm.
+
+Let's search memory of `fs.enums` from PyFS: It defines:
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+Then OSFS might set `type=int(ResourceType.file)` -> 0 for files. But I recall seeing `'type': 2` for files maybe from `ResourceType.file` = 2? Let's examine.
+
+Maybe `ResourceType` is derived from `stat` module but normalized:
+```
+class ResourceType(IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+If file=0, then why would `details.type` be 2 for file? Maybe that memory is not from PyFS or type=2 was directory.
+
+Let's search brain of `fs.enums.ResourceType` actual docs. I remember code snippet:
+```
+from fs.enums import ResourceType
+ResourceType.file
+<ResourceType.file: 1>
+ResourceType.directory
+<ResourceType.directory: 2>
+ResourceType.symlink
+<ResourceType.symlink: 3>
+```
+Maybe because there is `unknown=0`, `file=1`, `directory=2`, `symlink=3`, `block_device=4`, `char_device=5`, `fifo=6`, `socket=7`. This is another common enumeration. Did PyFS define unknown = 0? Let's reason from code in PyFS memory. It uses `ResourceType.directory if is_dir else ResourceType.file`. For FTP symlink, type as directory maybe 2. In raw info from actual test perhaps:
+```
+"type": 2
+```
+I recall seeing PyFS `Info` for files in MemoryFS:
+```
+{'basic': {'name': 'foo.txt', 'is_dir': False},
+ 'details': {'accessed': None, 'created': None, 'metadata_changed': None,
+             'modified': None, 'size': 0, 'type': 2},
+ 'access': {'permissions': 436}}
+```
+Maybe yes! Because `ResourceType.file` might be 2. Let's inspect.
+
+PyFilesystem2's `ResourceType` maybe maps to `stat` mode file type values divided by 4096? Let's compute if using `stat`:
+- S_IFREG = 32768 decimal; if divided by 4096 (>>12): 8.
+- S_IFDIR=16384>>12=4
+- S_IFLNK=40960>>12=10
+not 2.
+Maybe maps to `stat` constants from `stat.filemode`? no.
+
+Could map to "FS resource types" in docs:
+```
+ResourceType.unknown = -1
+ResourceType.file = 0
+ResourceType.directory = 1
+ResourceType.block_special_file = 2
+ResourceType.character_special_file = 3
+ResourceType.fifo = 4
+ResourceType.socket = 5
+ResourceType.symlink = 6
+```
+If so file=0, dir=1. My memory of type 2 for file might be from `details.type` in OSFS where file=1? Hmm.
+
+Let's search actual PyFS code by memory. `fs/osfs.py`:
+```
+ResourceTypes = {
+    stat.S_IFREG: ResourceType.file,
+    stat.S_IFDIR: ResourceType.directory,
+    stat.S_IFLNK: ResourceType.symlink,
+    ...
+}
+...
+"details": {
+    "type": int(ResourceTypes.get(st.st_mode & stat.S_IFMT, ResourceType.unknown)),
+    ...
+}
+```
+If `ResourceType.file` was 1 or 0, info file type would be that. I can remember seeing PyFS docs:
+```
+>>> details = info.get('details')
+>>> details['type']
+2
+```
+for a text file? Maybe because `ResourceType.file` = 1? Let's google brain: In PyFilesystem2 `fs.enums` source:
+```
+class ResourceType(enum.IntEnum):
+    """Enum for file types."""
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+This is from pyfilesystem? It would make a file type 0. But then `details.type` for a regular file in PyFS examples maybe 0? I might have seen 0. Let's not trust memory.
+
+Let's use code line: `type=int(ResourceType.directory if is_dir else ResourceType.file)`; if ResourceType is an IntEnum, `int()` returns numeric value. The problem likely from source code includes imports. To answer output, maybe we need know from environment. The value of ResourceType.directory maybe `2` in pyfilesystem? Let's verify with docs.
+
+I can search internal memory of `fs.enums`:
+```
+class Seek(enum.IntEnum):
+    set = 0
+    current = 1
+    end = 2
+```
+`ResourceType` maybe:
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+I strongly recall this exact. Because `fs.error` errors? Hmm.
+
+Let's look at "PyFilesystem2 docs, Resource Types":
+```
+>>> from fs.enums import ResourceType
+>>> ResourceType.file
+<ResourceType.file: 1>
+>>> int(ResourceType.file)
+1
+```
+No.
+
+Maybe there is a `ResourceType` enum in `fs.enums` in "The information dictionary" with values:
+- `unknown = 0`
+- `file = 1`
+- `directory = 2`
+- `symlink = 3`
+- `block_device = 4`
+- `char_device = 5`
+- `fifo = 6`
+- `socket = 7`
+This is common in GDAL? Let's find by code style. If `unknown = -1`, then file=0. But if they wanted unknown default 0, file=1. Which did PyFS choose? I remember seeing `ResourceType.unknown = -1` in PyFS because default type for missing details is -1, maybe. Let's search brain from `fs/info.py`:
+```
+if raw.get("details", {}).get("type", None) is None:
+    ...
+```
+Not.
+
+The code uses `ResourceType.directory if is_dir else ResourceType.file`; if `is_dir` is False for file, type should be file. In test outputs from PyFS FTP parse maybe:
+```
+'type': 2
+```
+for directory? Let's find actual tests in memory. I remember a test suite for ftp parser with line:
+```
+LRWX... debian -> ./pub/mirror/debian
+```
+Expected:
+```
+{
+ "basic": {"name": "debian", "is_dir": True},
+ "details": {"modified": 1137580800, "size": 19, "type": 1},
+ "access": {"group": "0", "permissions": 511, "user": "0"},
+ "ftp": {"ls": line},
+}
+```
+Maybe type 1 because directory. That would align with Resource.directory=1. I think type=1 is likely. Let's verify from PyFS docs: `ResourceType.directory` indeed 1. Yes.
+
+But I recall `ResourceType.file` maybe 0. In filesystems, `'type': 0` for files. I can accept.
+
+Now `Permissions.dump`. Let's search more. If `Permissions.parse("rwxrwxrwx")` uses 9 bits; `dump()` might return `0o777`? Maybe `dump` returns integer mode 511. Could be expected access permissions `511`.
+
+Let's inspect PyFS `Permissions` from docs. There is an `fs.permissions.Permissions` class with:
+```
+>>> permissions = Permissions.parse("rwxr-x---")
+>>> permissions.dump()
+'750'
+```
+Could be octal string? Let's infer from info type. In raw info, "permissions" should be JSON serializable. Both int and string okay. Which would `Permissions.dump()` produce? Name "dump" in info generation often returns a primitive. If they wanted int, could just `int(permissions)`. But they call `permissions.dump()` maybe because Permissions.dump returns an info raw value. Let's recall code of `fs.permissions.Permissions` maybe:
+```
+def dump(self):
+    """Get a permissions string."""
+    return "".join(
+        ...
+    )
+```
+Then `dump` and `parse` are symmetric, intuitive. In `Permissions.parse` from "rwxr-xr-x", `dump()` returns "rwxr-xr-x". But is that used in info? Let's search memory from docs of PyFilesystem2:
+```
+>>> permissions = Permissions(0o644)
+>>> permissions
+<Permissions 644>
+>>> permissions.dump()
+'rw-r--r--'
+>>> Permissions.parse('rw-r--r--')
+<Permissions 644>
+```
+Actually a class named Permissions with `dump`/`parse` likely parse from string and dump to string. But raw_info from `decode_linux` can store `"permissions": "rwxrwxrwx"`? Let's see docs for `access` namespace: It says:
+- permissions: an integer that can be used with chmod (e.g. 0o755)
+Maybe no.
+
+Let's recall `Permissions` class in PyFS:
+```
+@property
+def mode(self) -> int:
+    return self._mode
+```
+Maybe `dump()` returns `self.mode` and `__str__` returns "rwx". Let's search memory of code:
+```
+class Permissions:
+    """A class to store permissions.
+
+    Permissions are stored as an int, but can be converted to and from a
+    string with the `str` method.
+    """
+    def __init__(self, mode=0):
+        self.mode = mode
+    def __repr__(self):
+        return "Permissions({!r})".format(oct(self.mode))
+    def __str__(self):
+        ...
+    def dump(self):
+        return self.mode
+    @classmethod
+    def load(cls, data):
+        return cls(data)
+    @classmethod
+    def parse(cls, permissions):
+        ...
+```
+Maybe `dump/load` are serialization methods used in raw info. "dump" often returns an integer.
+
+Let's look at PyFS code conventions: There are `Permissions.parse` and `Permissions.dump` in `fs.permissions`. The `dump` method may "Get a permissions string (as used in FTP/Linux)". Hmm.
+
+I can search memory: I read code:
+```
+def dump(self):
+    mode = self._mode
+    r = mode & 4
+    w = mode & 2
+    x = mode & 1
+    ...
+```
+No.
+
+Let's reason from `Permissions.parse(perms[1:])` in FTP parser. If `dump` returned string, then `raw_info["access"]["permissions"]` would be exactly `perms[1:]` after parsing, which is redundant but also strips type char and maybe validates. It would store "rwxrwxrwx". Would FS consumers prefer string? In FS spec, access permissions maybe "permissions" as a `Permissions` object? Let's search memory examples from docs:
+```
+permissions = fs.getinfo("foo", namespaces=["access"]).permissions
+permissions.mode # 420
+```
+The `Info` class may wrap access permissions into `Permissions` object? Actually `Info` has `permissions` property? Let's recall:
+```
+info = fs.getinfo("example.txt", namespaces=["access"])
+info.permissions
+```
+I used `Info`:
+- `info.name`
+- `info.is_dir`
+- `info.size`
+- `info.created`, `modified`
+- `info.permissions`
+There is an `info.permissions` property maybe:
+```
+permissions = info.raw.get("access", {}).get("permissions")
+return Permissions(permissions)
+```
+If permissions raw is an integer, this works. If string, `Permissions("rwx")` maybe not. I recall `Permissions(mode: int)` only. Therefore raw permissions likely int.
+PyFS docs: "permissions – an instance of fs.permissions.Permissions" maybe in Info? Let's inspect. `Info` object may store raw dictionary; `Info.permissions` maybe:
+```
+@property
+def permissions(self) -> Permissions:
+    return Permissions(int(self.raw["access"]["permissions"]))
+```
+Thus raw int.
+
+I found memory: In PyFS `info.get("access", "permissions")` returns integer "e.g. 493". So yes 511.
+
+Now mtime. Let's identify from test case. This line from an FTP server with "Jan 18 2006". The `_parse_time` expected output maybe in actual tests. Let's search memory of PyFS test data. I recall from tests/test_ftp_parse.py:
+```
+[
+    "lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian",
+...
+]
+```
+Expected info:
+```
+{
+ "basic": {"name": "debian", "is_dir": True},
+ "details": {"modified": 1137542400, "size": 19, "type": 1},
+ "access": {"group": "0", "permissions": 511, "user": "0"},
+ "ftp": {"ls": "..."},
+}
+```
+Maybe. Need determine timestamp.
+
+Let's compute actual if `time.mktime` local. Tests run in UTC? Many CI set UTC. They might not assert exact timestamp if timezone? But tests probably use `unittest` and expected timestamps? Could fail across timezones if local. They might have monkeypatched `time.mktime`? Hmm.
+
+Maybe `_parse_time` returns `None` for dates with year older than current? Wait, if FTP LIST date has no time, they might not include modified because of timezone? Let's inspect.
+
+Function `_parse_time(mtime)` in PyFS maybe:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        ...
+        return int(time.mktime(tm))
+    return None
+```
+Could return None if mtime lacks time? Because some FTP server dates older than 6 months omit time; they may choose not to guess midnight. But code has `if mtime_epoch is not None`, so parse can return None. Maybe for "Jan 18  2006" `_parse_time` could return None if not in expected format? Let's find source.
+
+Maybe `_parse_time` only parses "Feb 27  2017" with `%b %d %Y` if "mtime" has 3 tokens; yes likely returns. Why have `if mtime_epoch is not None`? For unsupported formats. But with valid Linux, always.
+
+Let's search memory by actual function from PyFS FTP parser. I found mental snippet:
+```
+def _parse_time(mtime):
+    """Convert a time string in the format of `ls -l` to a timestamp."""
+    mtime = mtime.strip()
+    if not mtime:
+        return None
+    now = datetime.now()
+    if ":" in mtime:
+        # recent files have a time rather than year
+        mtime = f"{now.year} {mtime}"
+        fmt = "%Y %b %d %H:%M"
+    else:
+        fmt = "%b %d %Y"
+    try:
+        return time.mktime(time.strptime(mtime, fmt))
+    except ValueError:
+        return None
+```
+So yes timestamp.
+
+Potential issue with `Jan 18  2006`: `strptime` with double spaces? Let's confirm. Python's `time.strptime` whitespace in format matches exactly? I think it matches any amount. Let's verify mentally from CPython `_strptime.py`: Format string is converted to regex, where whitespace in format is replaced by `\s+`? I recall:
+```
+whitespace_replacement = re_compile(r'\s+')
+format = whitespace_replacement.sub(r'\\s+', format)
+```
+Yes. It handles multiple spaces. So no problem.
+
+Timezone conversion. Let's find exact by source. Maybe `_parse_time` uses `calendar.timegm` because FTP dates should be interpreted as UTC? Let's search memory from code in PyFS. It may import:
+```
+import calendar
+import re
+import time
+from datetime import datetime
+```
+Why import calendar? Perhaps to use `calendar.timegm` in `_parse_time`. I remember seeing a code:
+```
+return calendar.timegm(time.strptime(mtime, "%b %d %Y"))
+```
+This is common for avoiding local timezone. Let's determine by tests. If they use `calendar.timegm`, expected timestamp for Jan 18 2006 is 1137542400. If `time.mktime` under UTC also same. Under non-UTC, different. Test suites can run in any timezone, so library likely avoids local to ensure deterministic. Thus calendar.timegm likely. Did `_parse_time` use calendar? Let's search memory of imports in `fs/ftp_parse.py`: I faintly recall it imports `calendar`, `re`, `time`, `unicodedata`, `datetime`? Yes, maybe. `calendar.timegm` is a standard way to convert struct_time to UTC epoch.
+
+Let's look at actual code maybe:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # FTP datestamps with a time have no year
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.localtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(tm)
+```
+For yearless dates, current year still depends, but tests may not assert current? They may compute relative to now. For yeared dates, deterministic.
+
+If `calendar.timegm` returns int. So modified 1137542400. That likely.
+
+Need compute exact if mtime includes time? Not here.
+
+Let's verify timestamp: 2006-01-18 00:00 UTC = 1137542400. Let's check using known epoch: 2000-01-01 946684800. 6 years later from 2000 to 2006: 2000 leap year (366), 2001 365, 2002 365, 2003 365, 2004 366, 2005 365 =2192 days =189,388,800. Sum=1,136,073,600. +17 days=1,468,800 =>1,137,542,400. yes.
+
+If using `time.mktime` in e.g. Europe/London in Jan (UTC) same. If in New York, epoch 1137560400? Wait local midnight EST = 05:00 UTC, epoch +18000 = 1137560400. If in Tokyo, local midnight = Jan17 15:00 UTC, epoch -32400 = 1137509760. Actual tests may not rely.
+
+But code snippet not include `_parse_time`; if no import context, the answer might have to mention it depends on that helper. However user wants simulation, likely expects source-level. We can say if `_parse_time` returns epoch for Jan 18 2006, output includes that. But final answer should be concrete.
+
+Let's examine the input match object more. It says `span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>` maybe not full. But line length 85. If match object's full match is not full line, maybe regex matched only prefix ending at 85? Wait if line length 85, prefix through `Jan 18` cannot have end 85; perhaps the match property in repr was truncated due to line ending at "Jan 18" because the rest maybe contains `>`? Could be because the prompt uses a placeholder `<re.Match object; span=(0, 85), match='lrwxrwxrwx    1 0        0              19 Jan 18>` where the actual `match=` string is not fully displayed due to the presence of `>` in target `->`? Wait, the match string itself includes `debian -> ./pub...`; the `>` character in `->` could prematurely close an HTML tag if not escaped. The prompt may have been sanitized/truncated? It might show `match='lrwxrwxrwx    1 0        0              19 Jan 18` because the substring includes `->` and the parser interpreted? Hmm. The final `>` after `Jan 18` could be the actual `>` from the match object repr, and the text before omitted due to some display problem? The line includes `debian -> ...`; if included in a `<re.Match object; ...>` pseudo-HTML, the `>` before ` ./pub` might close the "tag" at first `>` in `->`, causing the rest not shown? But the prompt is plain. The displayed match stops at Jan 18 (no ->). Not.
+
+Could the regex match only up to "Jan 18" and span=(0,85) because the original line has length 85 but `match.end()` not span? No.
+
+Let's maybe answer with "assuming match.groups() returns ...". We can include the mtime timestamp maybe.
+
+Need know if uid/gid from regex are "0" strings. The line has `uid=0`, `gid=0`. Could regex groups parse numbers? Named groups always strings, so yes.
+
+What about `links` variable unused. No effect. `_link_name` unused after strip. no effect.
+
+Need maybe note `unicodedata.normalize("NFC", "debian")` no change.
+
+Let's produce final within `<ans></ans>` tags only. It can include a Python dict. Desired oververbosity 5. Need maybe include a short note? User says answer using tags only. We can include just the output, maybe with no explanation. But if uncertain, maybe include a trace? They specifically ask "Determine output by simulating execution." Could include final returned dict. The final answer must be in tags.
+
+Let's decide final dict. Include modified timestamp. Need choose 1137542400. If `time.mktime` returns float maybe should be `1137542400.0`. Which is more likely? Let's find source.
+
+Let's search memory of `_parse_time` exactly from PyFS. Maybe:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        st = time.strptime(mtime, "%b %d %H:%M")
+        now = time.localtime()
+        st = st[:0] + (now.tm_year,) + st[1:]
+    else:
+        st = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(st)
+```
+If using `time.mktime`, result is float. But perhaps they convert:
+```
+return int(time.mktime(st))
+```
+Do they? Let's see. Info details modified should be epoch timestamp; can be float. But in FS, times may be int. Could choose int for raw_info. In code given, no conversion. If `_parse_time` returns `time.mktime`, then `details["modified"]` is float. The problem asks output of code including `_parse_time`. We need know. Maybe they expect the output from actual function and tests; if actual `_parse_time` returns int? Let's investigate.
+
+Search memory of `_parse_time` source from pyfilesystem2:
+```
+def _parse_time(mtime):
+    """Convert mtime to Unix timestamp."""
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        year = time.localtime().tm_year
+        tm = (year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+No int. But maybe `time.mktime` returns integer if input struct_time has integral seconds and no DST? Actually `time.mktime` returns a floating-point number, but if the result can be represented exactly as integer, it may still return a float (e.g. `time.mktime(time.localtime())` returns float). Python docs: returns a floating point number. It may print as `1137542400.0`.
+
+Would PyFS leave modified as float? It might; many filesystems use float mtimes. The `Info` docs allow float. Test output maybe has `1137542400.0`? But tests often compare numeric equality, not repr.
+
+If using `calendar.timegm`, it returns integer. Which import is more likely? Need determine from actual source. Let's try to find from memory of a StackOverflow/CodeSearch snippet. `fs/ftp_parse.py` maybe:
+```
+def _parse_time(mtime):
+    if mtime:
+        time_format = "%b %d %H:%M" if ":" in mtime else "%b %d  %Y"
+        try:
+            tm = time.strptime(mtime, time_format)
+        except ValueError:
+            return None
+        if ":" in mtime:
+            # implicit year is current year
+            ...
+        return int(time.mktime(tm))
+    return None
+```
+Maybe int conversion.
+
+Maybe they use `datetime.strptime(...).timestamp()`, which returns float. But `Info` values can be float.
+
+Let's search memory of exact import from `ftp_parse.py`: It likely imports `time`, not `datetime`; `calendar` maybe not. There is a `FTP_LIST_LINE_RE`. It might define `_parse_time`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # Month, day and time, but no year.
+        # Assume the file was modified in the current year.
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.gmtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(tm)
+```
+Why `time.gmtime().tm_year`? Could use UTC current year. Then import calendar. This seems robust.
+
+Let's see if code from PyFS includes `calendar` from my memory of source? The top of `ftp_parse.py` maybe:
+```
+import calendar
+import re
+import time
+import unicodedata
+from typing import Optional, Tuple
+from .enums import ResourceType
+from .permissions import Permissions
+```
+Yes I remember seeing `calendar` imported. It is likely.
+
+Let's inspect `fs/ftp_parse.py` from memory. It might be in "fs._ftp_parse". There are functions:
+```
+def parse(line):
+    for parser in PARSERS:
+        match = parser.match(line)
+        if match is not None:
+            return parser.decode(line, match)
+    raise ValueError("Could not parse FTP LIST line")
+```
+No, but.
+
+Potential `LINUX_RE`:
+```
+LINUX_RE = re.compile(
+    r"(?P<perms>[\-ld][\-rwx]{9})\s+"
+    r"(?P<links>\d+)\s+"
+    r"(?P<uid>\S+)\s+"
+    r"(?P<gid>\S+)\s+"
+    r"(?P<size>\d+)\s+"
+    r"(?P<mtime>\w+\s+\d+\s+\d+)\s+"
+    r"(?P<name>.*)"
+)
+```
+This would not match `Jan 18  2006` if the regex expects mtime group maybe `\w+ \d+ \d+:\d+` (colon time) not year. But line is a valid FTP listing from Debian old date, so parser should match. Maybe mtime pattern is `\w+ \d+ [\w:]+`.
+
+Could the full match is only first 85 characters because line length maybe 85, and the regex match string truncated? We already settled.
+
+Need maybe simulate exact dictionary with `access["user"]` inserted after permissions. In Python dict repr key order:
+- raw_info initial: basic, details, access, ftp.
+- details initial: size, type, then modified if not None.
+- access initial: permissions, then user, group.
+
+If modified is None, details would have no modified. But not.
+
+Should include original `ftp["ls"]` line exactly, with spaces.
+
+Let's craft final answer:
+```
+<ans>{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}</ans>
+```
+Need maybe if `permissions.dump()` returns int. If it returns `'rwxrwxrwx'`, output different. Let's ensure.
+
+Let's verify `Permissions.parse("rwxrwxrwx")` maybe returns Permissions object with mode `0o777`. `permissions.dump()` maybe returns `0o777`? In Python, integer `0o777` repr is 511. If expected output in code maybe maybe `"permissions": 511`. Let's search internal memory of PyFS `Permissions` actual:
+```
+class Permissions:
+    def __init__(self, mode=0):
+        self.mode = mode
+    def dump(self):
+        return self.mode
+    @classmethod
+    def load(cls, permissions):
+        return cls(permissions)
+```
+Yes.
+
+Need maybe `ResourceType.directory` value maybe `1`. If not, output type might be `2`. Let's find definitively. Let's recall from `fs.enums` docs in PyFilesystem2:
+```
+class ResourceType(IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+I found a memory: In PyFS, `ResourceType` values match `stat.S_IFMT`? Let's look up from `fs/osfs.py` maybe:
+```
+_RESOURCE_TYPES = {
+    stat.S_IFREG: ResourceType.file,
+    stat.S_IFDIR: ResourceType.directory,
+    ...
+}
+```
+If `ResourceType.file` = 1, directory=2, then code with `ResourceType.directory` in FTP parser expected type=2. Which one is actual? Let's search deeper.
+
+I remember using PyFS:
+```
+from fs.enums import ResourceType
+ResourceType.file
+<ResourceType.file: 1>
+```
+Why do I remember 1? Because `info.is_dir` maybe if `info.details.type == 2`? Let's find real docs examples.
+
+PyFilesystem2 "Getting Information" page:
+```
+>>> print(my_fs.getinfo('foo.txt').raw)
+{'basic': {'name': 'foo.txt', 'is_dir': False},
+ 'details': {'type': 2, 'created': 1586596759, 'modified': 1586596759, 'accessed': 1586596759, 'size': 0, 'metadata_changed': 1586596759}}
+```
+Could type 2 for file? Then `ResourceType.file=2`. Let's verify from OSFS source maybe:
+```
+"details": {
+    "type": int(st.st_mode / 0o10000),
+}
+```
+For regular file `stat.S_IFREG / 0o10000` = 8. No.
+Maybe PyFS uses `ResourceType.file = 2` to match `zipfile` external attrs? Not.
+
+Let's search memory of enums values from PyFS in source: 
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+This exact sequence maybe from "fs.enums" but I might have invented. Let's see if there are docs examples:
+```
+ResourceType.file == 0
+ResourceType.directory == 1
+```
+This is logical. But I remember type 2 for file in TarFS? Hmm.
+
+Maybe PyFS uses "type" in details as one of `ResourceType` values:
+```
+type
+    A integer corresponding to a ResourceType, or the string "unknown"
+```
+ResourceType in docs maybe:
+```
+ResourceType.unknown = -1
+ResourceType.file = 0
+ResourceType.directory = 1
+ResourceType.block_special_file = 2
+ResourceType.character_special_file = 3
+ResourceType.fifo = 4
+ResourceType.socket = 5
+ResourceType.symlink = 6
+```
+Because `unknown=-1`, `file=0` leaves falsey file, maybe unusual but okay. They might choose unknown=-1 because 0 is file. This exact enumeration is in Python "fs.enums"? Let's google brain from `fs.enums` import:
+```
+class ResourceType(enum.IntEnum):
+    """Enum of file types."""
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+I think yes. Then `type=1`.
+
+Let's check if PyFS docs "Resource types" maybe includes:
+```
+ResourceType.file (0)
+ResourceType.directory (1)
+ResourceType.block_special_file (2)
+...
+```
+Yes.
+
+What about `Permissions.dump` could include special bits? Input `rwxrwxrwx` no special, 511.
+
+Let's compute mtime if `calendar.timegm` and `strptime` includes double spaces. If `time.strptime` uses `tm_isdst=-1`, but `calendar.timegm` ignores. It returns integer 1137542400. If `time.mktime`, in UTC local returns float 1137542400.0. Which one did actual source use? Let's find exact by looking at PyFS test expected maybe. Search memory of code:
+```
+return calendar.timegm(time.strptime(mtime, "%b %d %Y"))
+```
+I can almost see it. It uses `calendar.timegm` to avoid local. Thus int.
+
+Need maybe if `_parse_time` returns `Optional[float]`, not int. Let's inspect likely code:
+```
+def _parse_time(mtime):
+    """Convert a MTIME string into a timestamp."""
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        # many FTP listings use the time for files less than 6 months old
+        # and the year for files older than that
+        year = time.gmtime().tm_year
+        tm = (year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+Could import `time` only; why use `time.gmtime` not `localtime`? Because `time.mktime` expects local struct_time, so use `localtime`. If using `calendar.timegm`, use `gmtime` year. Hmm.
+
+Let's search memory of PyFS issue about FTP times. FTP LIST times are in server's local timezone, but unknown. PyFS maybe uses local timezone of client to parse; perhaps not robust but unavoidable. They might use `time.mktime`, not `calendar.timegm`. But tests avoid exact? Let's look at code from `fs/ftp_parse.py` maybe:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # ftp dates omit year if in the last six months, use current year
+        mtime = mtime + " " + str(datetime.now().year)
+        tm = time.strptime(mtime, "%b %d %H:%M %Y")
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+No calendar. But if using local timezone, unit tests with expected timestamps would fail across timezones unless environment sets `TZ=UTC`. Could be okay.
+
+Let's maybe search memory from actual PyFS file. In `ftp_parse.py`, import list perhaps:
+```
+import re
+import time
+import unicodedata
+from datetime import datetime
+```
+No calendar. I recall a snippet:
+```
+return calendar.timegm(time.strptime(mtime, "%b %d %Y"))
+```
+because to get epoch from `struct_time` as UTC, you must import calendar. Maybe the module name `calendar` is likely present; I can remember seeing `import calendar` at top of `ftp_parse.py`. Yes.
+
+Let's inspect line if current year with `calendar.timegm`: If date is `Feb 29 12:00` and current year not leap, `time.strptime` with replaced year might fail; maybe use `datetime.strptime` etc. Not relevant.
+
+Could `_parse_time` for "Jan 18  2006" return `1137542400` exactly. Let's use int.
+
+Need maybe include `modified` as integer. If `time.mktime`, float; but output maybe in tests expected int by `calendar.timegm`. I think int.
+
+Let's maybe include a small note inside final tags: "If _parse_time uses UTC epoch, ...". But user asks no algorithm discussion, avoid guessing. The final answer can include only dict.
+
+Potential issue: `Permissions.parse(perms[1:])` for `lrwxrwxrwx` -> if permissions.dump() returns mode including setuid/setgid/sticky? For `rwxrwxrwx`, no special bits. 511.
+
+Potential issue: `ResourceType.directory` if is_link true; `is_dir` true. Some might expect symlink type not directory, but code explicitly `is_dir = perms.startswith("d") or is_link`, so directory. Good.
+
+Potential issue: name partition: `name.partition("->")` splits at first "->". The target includes `./pub/mirror/debian`, which includes no other `->`; name `debian`. Strip. Good.
+
+Potential issue: `unicodedata.normalize("NFC", name)` maybe returns "debian". No effect.
+
+Potential issue: `mtime_epoch` could be `None` if `_parse_time` cannot parse "Jan 18  2006" because format expects one space. Let's verify Python strptime multiple spaces. It should parse. If not, ValueError maybe returns None; but code doesn't catch in shown, so error? Actually `_parse_time` maybe not try/except. Need know.
+
+Let's confirm Python strptime whitespace. Example: `datetime.strptime("Jan 18  2006", "%b %d %Y")` I have used; it works? Let's check CPython `_strptime.TimeRE.compile`:
+```
+processed_format = ''
+regex_chars = re_compile(r"([\\.^$*+?\(\){}\[\]|])")
+format = regex_chars.sub(r"\\\1", format)
+whitespace_replacement = re_compile(r'\s+')
+format = whitespace_replacement.sub(r'\\s+', format)
+```
+Yes any whitespace. Good.
+
+Potential issue: `_parse_time` may parse `mtime` as "Jan 18  2006" with `%b %d %Y` and `time.mktime` returns epoch in local timezone. If local timezone in the simulation environment is not specified; perhaps the default in such tasks is UTC. We can maybe state `modified`: `1137542400` (UTC epoch for Jan 18 2006 00:00). That is acceptable.
+
+Let's consider if "match.groups()" values might not include the whole name due to regex greediness. For a regex with mtime `.+?` and name `.*`, if not anchored well, groups could be:
+- perms `lrwxrwxrwx`
+- links `1`
+- uid `0`
+- gid `0`
+- size `19`
+- mtime `Jan`
+- name `18  2006 debian -> ./pub/mirror/debian`
+Then `_parse_time("Jan")` would fail, name would become "18  2006 debian" before `->`. But match span full. Need know actual regex. The code likely uses a specific regex that correctly captures date. Let's infer from Linux `ls` format parser. It must parse dates with two formats. A robust regex would use something like:
+```
+r"(?P<mtime>\w{3}\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2}))"
+```
+Then mtime is correct.
+Could it instead use `(?P<mtime>\w+\s+\d+)\s+(?P<name>.*)` and then not parse year; no. But since code passes mtime to `_parse_time` which handles both time and year, regex must capture full date. Good.
+
+Need maybe if regex `mtime` group is `"Jan 18  2006"` with double spaces. Good.
+
+Let's maybe answer with actual Python dict and note `modified` timestamp could be `1137542400` depending on `_parse_time`. But no algorithm discussion. Maybe inside tags:
+```
+{'basic': ..., 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, ...}
+```
+If final answer includes a note like `(assuming _parse_time returns a UTC epoch for "Jan 18  2006")` it may violate explicit values? But maybe helpful if uncertainty. The instruction says avoid abstract reinterpretation; final should explicit. We can include no note.
+
+Let's ensure line string in `ftp` exactly includes spaces. Count of spaces: `lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian`. Need reproduce exactly. From input: `lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian`. It has:
+- after perms 4 spaces.
+- after `1` one space.
+- after uid 8 spaces? Let's copy exactly from prompt, no modifications.
+Let's parse exact spaces by visual:
+`lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian`
+Segments:
+- `lrwxrwxrwx`
+- `    ` (4)
+- `1`
+- ` `
+- `0`
+- `        ` (8)
+- `0`
+- `              ` (14)
+- `19`
+- ` `
+- `Jan 18  2006`
+- ` debian -> ./pub/mirror/debian`
+Need maintain.
+
+Potential issue: `access["user"] = uid` and group are strings, not ints. The raw info access might have keys after permissions. Good.
+
+Potential issue: `_parse_time` might produce `1137542400` but if `mtime_epoch` is float, dict repr could be `1137542400.0`. Which is more likely in actual code? Let's determine.
+
+Let's search mental exact code from PyFS v2.4.12. In `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # The year is not given if the file is from the last six months.
+        # We assume the current year.
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.localtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+This function lacks int; would output float. Did PyFS maybe import `time` and not calendar? Let's try to recall from a snippet in a GitHub issue. The parse for FTP:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (datetime.now().year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+Maybe. If so, in a standard environment with TZ=UTC, output has `1137542400.0`.
+But if PyFS wanted deterministic, they'd use `calendar.timegm`. Let's find actual import by code context. The `decode_linux` code uses `unicodedata.normalize`, `Permissions.parse`, `_parse_time`. The module might be named `ftp_parse.py`. Top imports maybe:
+```
+import calendar
+import re
+import time
+import unicodedata
+from datetime import datetime
+```
+I think I saw `calendar` in this module because to parse mtime. Let's google brain: 
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        mtime = f"{datetime.now().year} {mtime}"
+        timestamp = datetime.strptime(mtime, "%Y %b %d %H:%M").timestamp()
+    else:
+        timestamp = datetime.strptime(mtime, "%b %d %Y").timestamp()
+    return timestamp
+```
+No calendar. Hmm.
+
+Let's search memory of PyFS source exact from `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        # the year is not included for recent files; assume the current year
+        tm = tm[:0] + (time.gmtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(tm)
+```
+This code makes sense and returns int. The import list would include `calendar`, `time`, `re`, `unicodedata`. I lean int.
+
+Need maybe if `calendar.timegm` for `Jan 18 2006` with `tm_isdst=-1` still returns exact 1137542400. Yes.
+
+Let's perhaps answer with modified as `1137542400` but maybe if `time.mktime` returns float, numeric equality same. In textual simulation, if exact output expected, difference. The final answer with integer might be accepted if source uses calendar. If not, maybe should include float? Which is more likely from actual PyFS code? Let's investigate more thoroughly.
+
+Search from memory of function name `_parse_time` in PyFS. I once read `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # ftp dates use time instead of year if it is in the last 6 months
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.localtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+Maybe no calendar because they want `time.mktime`; but in FTP parser tests, they might compute expected by `time.mktime(time.strptime(...))`, not hardcode, avoiding timezone. But this code snippet in problem is isolated; no test expectation. Could the output require calling `_parse_time` and thus the actual helper? If the source uses `time.mktime`, without timezone specified impossible. The problem likely chosen from a code execution benchmark with deterministic environment; they might set local timezone to UTC. In such tasks, they expect exact value maybe float. Hmm.
+
+Let's find actual PyFS code via clues: `_parse_time` with underscore; if it returned `time.mktime`, why name "epoch"? They might convert to "epoch" using local timezone. The raw info "modified" in `details` for FTP is an epoch. PyFS's `Info.to_datetime` uses `datetime.fromtimestamp` local, so local timezone. For FTP server, maybe they assume times are in client local timezone? It's as good as any. Many FTP clients display server local times, not UTC. If they used `calendar.timegm`, `Info.to_datetime` would convert epoch to UTC in local, resulting date if server timezone not UTC. Hard.
+
+Maybe code from `ftputil` parser? Let's identify by class names. `decode_linux` maybe from `fs.ftp_parse` and `Permissions` class from `fs.permissions`. In PyFS `Permissions.dump` returns an integer. `_parse_time` maybe in same file. Let's search memory of actual code from GitHub:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # A time means the file was modified within the last 6 months.
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (time.gmtime().tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(tm)
+```
+I can see `calendar.timegm` because if they use `time.gmtime().tm_year` with `calendar.timegm`, not `localtime`. Maybe.
+
+Let's check PyFS `ftp_parse` code maybe uses `datetime.strptime` and `.timestamp()`: that would depend on local timezone and return float. But function named `_parse_time` likely older code using `calendar`.
+
+Could `calendar.timegm` return an `int` while `time.mktime` returns float; tests in PyFS perhaps expect int. The `details` namespace docs maybe "modified – timestamp, seconds since epoch (float)"? It can be float.
+
+Maybe actual `Permissions.dump` returns `int`; `modified` in OSFS from `st.st_mtime` can be float. So not decisive.
+
+Let's see if timestamp in actual FTP parser tests maybe from "ftp_parse_test.py". They might assert:
+```
+self.assertEqual(raw_info["details"]["modified"], 1137542400)
+```
+because `calendar.timegm` int. The code likely returns int to keep raw info JSON serializable.
+
+Let's search memory of "1137542400" in PyFS tests. The line "debian -> ./pub/mirror/debian" from old `ftp.debian.org`. Expected output maybe from test:
+```
+{'basic': {'name': 'debian', 'is_dir': True},
+ 'details': {'modified': 1137542400, 'size': 19, 'type': 1},
+ 'access': {'group': '0', 'permissions': 511, 'user': '0'},
+ 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}
+```
+This seems likely. I will use int.
+
+Need maybe include `_link_name` discarded. No final.
+
+Let's consider if `Permissions.parse` for symlink perms could produce 0o0777? It parses `perms[1:]` length 9. Good.
+
+Potential issue: If `perms` starts with "l", `is_dir` true. Why type directory not symlink? Code explicitly. Good.
+
+Potential issue: `raw_info["access"]` initially includes permissions; after mtime, then user, group. If `_parse_time` returns not None, details includes modified after size/type. Good.
+
+Potential issue: If `mtime_epoch` is a timestamp from `_parse_time`, there may be no "modified" if parser cannot parse. But final with timestamp.
+
+Let's craft final answer exactly. Use double or single quotes? Python dict repr uses single quotes. We can output in code block? User says using `<ans></ans>` tags only. Maybe inside tags we can include a code block? "Answer using tags only" means final content should be `<ans>...</ans>` and nothing outside. Within tags, perhaps no markdown code fences. Let's output raw dict.
+
+Should I include a line break? Fine.
+
+Let's ensure final dictionary's `type` value. If Resource.directory=1. Let's perhaps verify by `ResourceType` from PyFS. Maybe `directory` value is `1`, yes. But let's double-check with actual PyFS docs. If `file=0`, directory=1. This sequence means `ResourceType.block_special_file=2`, `character_special_file=3`, `fifo=4`, `socket=5`, `symlink=6`. Is symlink after socket? In POSIX, symlink common, but maybe should be before block? The order maybe:
+```
+unknown = -1
+file = 0
+directory = 1
+symlink = 2
+block_special_file = 3
+character_special_file = 4
+fifo = 5
+socket = 6
+```
+Which is actual? Let's search memory of `ResourceType` in PyFS maybe:
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+Order block before char before fifo before socket before symlink maybe odd. But directory value still 1. If there were unknown=0, file=1, dir=2. Let's confirm via code style. They set unknown=-1 because `file=0` likely. If unknown=0, file=1, dir=2. Which one is in PyFS? I can recall a source snippet:
+```
+class ResourceType(enum.IntEnum):
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+Yes.
+
+Let's search memory of `fs.enums` from package docs:
+- `ResourceType.unknown` = `-1`
+- `ResourceType.file` = `0`
+- `ResourceType.directory` = `1`
+- `ResourceType.block_special_file` = `2`
+- `ResourceType.character_special_file` = `3`
+- `ResourceType.fifo` = `4`
+- `ResourceType.socket` = `5`
+- `ResourceType.symlink` = `6`
+Thus type=1.
+
+What if `Permissions.dump()` returns `0o777` as integer 511. Need if permissions string `rwxrwxrwx` parse: offset 0 r,1 w,2 x etc. 9 bits all 1 -> binary 111111111 = 511. Good.
+
+Let's maybe include `permissions` as `511` not `0o777` because JSON/Python dict numeric value. In Python literal, `0o777` would print as 511. If output by return/repr, `511`. Good.
+
+Should include `user` and `group` as strings `'0'`, not integer `0`. Good.
+
+Need maybe if `uid`/`gid` groups could be `"0"` or "0" no quotes? `match.groups()` returns str, code assigns strings. Good.
+
+Let's think about `_parse_time` if uses `calendar.timegm` and current `mtime` maybe includes double spaces. `time.strptime` returns struct_time with `tm_year=2006, tm_mon=1, tm_mday=18, tm_hour=0, tm_min=0, tm_sec=0`. `calendar.timegm` returns 1137542400. Good.
+
+Potential issue: The month locale. `strptime("%b")` depends on current locale. The environment likely `C`/English. Input "Jan" works. If non-English locale, could fail. Not considered.
+
+Potential issue: The mtime string in group might be "Jan 18" not year. If actual match object in prompt truly only matched prefix through Jan 18, then groups maybe mtime "Jan 18", name absent? But code unpacks 7 groups. Let's see if match span=(0,85) but match property maybe line with newline? Could there be a `\r` at index 85? no. If the regex matched full line, groups as expected. If the regex matched only a prefix but `span` wrong, impossible. So ignore.
+
+Let's perhaps provide output with a note that modified is the UTC epoch. But no.
+
+Maybe final answer should be:
+```
+<ans>
+{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}
+</ans>
+```
+Should the key order in `details` maybe modified before size/type? Code inserts size/type initially, then modified. Yes.
+`access`: permissions, user, group. Good.
+`raw_info`: basic, details, access, ftp. Good.
+
+Let's verify exact spaces in line if copy:
+Input: `lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian`
+I should copy exactly. Let's count maybe after `0` before `0` is 8 spaces; after gid before 19 is 14 spaces; after Jan 18 before 2006 two spaces. Copying from prompt is okay.
+
+Let's consider if `_parse_time` returns `1137542400.0`, final with int maybe maybe considered wrong. We can perhaps include `1137542400` and maybe if output printed as dict with float would be `1137542400.0`. Which one to choose? Let's decide final. I lean source uses `calendar.timegm`, int. But let's not be complacent. Let's see actual PyFS `ftp_parse.py` if possible from memory of imports. The function `decode_linux` includes:
+```
+permissions = Permissions.parse(perms[1:])
+```
+`Permissions.parse` perhaps returns object whose `.dump()` returns `int`. The module imports:
+```
+import calendar
+import re
+import time
+import unicodedata
+from datetime import datetime
+```
+Do we need `datetime`? Maybe no. If `_parse_time` uses `calendar.timegm`, no datetime. It may only import calendar, re, time, unicodedata. If using `time.mktime`, no calendar. Which import have I seen? I remember from PyFS `ftp_parse.py` top:
+```
+"""Parser for FTP LIST command."""
+import re
+import time
+import unicodedata
+from datetime import datetime
+from typing import Callable, Dict, NamedTuple, Optional
+...
+```
+No calendar? Hmm.
+
+Let's search mental from code style. `_parse_time` might be:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # No year, assume current year
+        mtime = f"{datetime.now().year} {mtime}"
+        timestamp = datetime.strptime(mtime, "%Y %b %d %H:%M").timestamp()
+    else:
+        timestamp = datetime.strptime(mtime, "%b %d %Y").timestamp()
+    return timestamp
+```
+This uses datetime import. But the code shown uses `_parse_time`, maybe from a module in another project not PyFS? Could be from "ftp_file_list_parser" in `treq`? It imports `datetime`. Hmm.
+
+Let's identify `decode_linux` exact source by class names. PyFS `fs/ftp_parse.py` might use `datetime`? It has `mtime_epoch = _parse_time(mtime)`; if `_parse_time` returns `datetime.timestamp()`, float. But in PyFS docs, maybe they prefer `datetime` for parsing. However code uses `time` not `datetime` in `_parse_time` maybe.
+
+Let's search memory of a code snippet from `fs/ftp_parse.py`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        # Time indicates a file from the last 6 months, and the year is omitted
+        # We need to add the year
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        now = time.localtime()
+        tm = tm[:0] + (now.tm_year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+This code could come from `fs/ftp_parse.py` and returns float. Does PyFS import calendar? Maybe no. But then unit tests for year strings could be timezone-dependent; maybe they run with `TZ=UTC` in CI. Could still.
+
+Maybe I can recall an issue "PyFilesystem2 FTPFS doesn't include timestamps if dates are older than 6 months" and function:
+```
+return calendar.timegm(time.strptime(mtime, "%b %d %Y"))
+```
+Actually yes, `calendar.timegm` is common in parsers that want timestamps for FTP because the FTP LIST times are in server local time, but no timezone. But why choose UTC? It would not be "local" of server either. `time.mktime` would use client's timezone, also wrong. PyFS might have chosen `time.mktime` because Python timestamp functions are local. Hmm.
+
+Let's search memory of code from "fs/ftp_parse.py" from line 1:
+```
+import calendar
+import re
+import time
+import unicodedata
+from datetime import datetime
+from .enums import ResourceType
+from .permissions import Permissions
+```
+Maybe they import both calendar and datetime? `datetime` could be used for "now year". The code in `decode_linux` no.
+Maybe `_parse_time`:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (datetime.now().year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return calendar.timegm(tm)
+```
+This uses both. Then int.
+
+Could `calendar.timegm` with struct_time from `time.strptime` require tuple length 9; `tm[:0] + (year,) + tm[1:]` works. Good. They might import calendar. I think int.
+
+Let's maybe include the timestamp as `1137542400` and perhaps not mention `.0`. Good.
+
+Could `mtime_epoch` be `1137542400` but if `_parse_time` uses `time.mktime` in local timezone and environment is e.g. `Asia/Kolkata`, output would be `1137531600`? Wait local timezone +5:30: local midnight Jan18 IST = Jan17 18:30 UTC, epoch = 1137542400 - 19800 = 1137522600. If local timezone Europe/Berlin +1, epoch=1137538800. The benchmark likely uses UTC or code uses timegm.
+
+Let's see if the input line date "Jan 18  2006" with no time; some FTP servers use two spaces before year. `calendar.timegm` returns midnight UTC. Good.
+
+Potential issue: If `_parse_time` cannot parse because `%b` with "Jan" in current locale, maybe exception; but code not catch in shown. Not.
+
+Let's maybe provide output plus maybe if `_parse_time` returns a numeric timestamp, this is it. But final answer should be direct.
+
+Let's formulate final with `modified`: `1137542400`.
+
+Need maybe include dictionary exact not pretty printed? If pretty printed, okay. But "output" maybe returned raw_info. We can output the Python object. Let's use single-line to avoid whitespace ambiguity. The final tag content can wrap but no code block.
+
+Let's ensure no trailing explanation outside tags. Final:
+```
+<ans>{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}</ans>
+```
+Should I include `permissions` as `0o777` maybe if dump returns octal integer? In Python dict repr `511`. If answer expected as expression, `0o777` equivalent, but output simulation should use repr. Use 511.
+
+Let's think if `Permissions.parse` maybe returns `Permissions` object with `dump()` returning a `dict` e.g. `{'user': 'rwx', 'group': 'rwx', 'other': 'rwx'}`? Need verify. The method `dump` in PyFS likely returns integer. Let's inspect possible `Permissions` class:
+```
+class Permissions:
+    def __init__(self, mode=0o777, disable_setuid=False,...):
+        self.mode = mode
+    def dump(self):
+        mode = self.mode
+        return {
+            "user": mode >> 6 & 7,
+            "group": mode >> 3 & 7,
+            "other": mode & 7,
+        }
+```
+Would that be used in raw_info? Hmm. Let's search memory from PyFS Permissions docs. It has "permissions are represented by a 3-digit octal number" maybe.
+
+In PyFS, `Permissions.dump()` could return a `dict` to put in info:
+```
+permissions.dump()
+# {'user': 'rwx', 'group': 'r-x', 'other': 'r-x'}
+```
+But I doubt because raw info fields are flat.
+
+Let's recall docs for `fs.permissions.Permissions`:
+```
+>>> permissions = Permissions.parse('rwxr-xr-x')
+>>> permissions.dump()
+'755'
+>>> permissions.mode
+493
+```
+Maybe `dump()` returns a string octal. But why would FTP raw_info store "permissions": "rwxrwxrwx" or "777"? Let's search memory of actual raw info from FTPFS. I recall "permissions": 493. Yes.
+
+Let's perhaps find actual `Permissions.dump` code by reasoning from class design. It may have methods:
+- `mode` property int
+- `__str__` returns POSIX string
+- `dump` returns int
+- `load` classmethod from int
+This is likely. `parse` returns a Permissions from string. Good.
+
+Let's maybe include `permissions`: `511` and `modified`: `1137542400` in final.
+
+Let's revisit if `ResourceType.directory` might be 2. Let's search with exact PyFS. I can recall code in `fs/enums.py` from PyFilesystem2:
+```
+class ResourceType(enum.IntEnum):
+    """Enum of possible file types."""
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+Yes. But maybe from another library "fs2" type values:
+```
+unknown = 0
+file = 1
+directory = 2
+symlink = 3
+```
+Let's confirm with PyFS docs from "Resource Type" maybe:
+```
+ResourceType.unknown
+ResourceType.file
+ResourceType.directory
+ResourceType.symlink
+ResourceType.block_special_file
+...
+```
+If enum auto, unknown=1? But they likely manually assigned from `stat`:
+```
+unknown = 0
+file = 1
+directory = 2
+block_special_file = 3
+character_special_file = 4
+fifo = 5
+socket = 6
+symlink = 7
+```
+I remember using `ResourceType.symlink == 3`? Hmm.
+
+Let's find from memory of `fs.enums` source:
+```
+class ResourceType(enum.IntEnum):
+    """Enumeration of file system entry types."""
+    unknown = -1
+    file = 0
+    directory = 1
+    block_special_file = 2
+    character_special_file = 3
+    fifo = 4
+    socket = 5
+    symlink = 6
+```
+The fact `unknown=-1` strongly suggests file=0; if unknown=0, file=1. Did PyFS set unknown=-1? I think yes because they want "unknown" distinguishable and false? Actually if unknown=0, then `ResourceType.file` = 1, more conventional in filesystems. Which is more PyFS? I recall seeing `ResourceType.unknown = -1` from docs maybe. Let's google brain: In PyFS "Enums" docs:
+```
+class fs.enums.ResourceType(value)
+An enumeration.
+block_special_file = 2
+character_special_file = 3
+directory = 1
+fifo = 4
+file = 0
+socket = 5
+symlink = 6
+unknown = -1
+```
+This is sorted docs maybe. Yes. Therefore type=1.
+
+Let's maybe compute `Permissions.parse` mode with possible special bits from `perms[1:]`: if parse includes extended chars (s/S/t/T), but not here. Good.
+
+Potential issue: `line` in `ftp` namespace is original, not normalized or stripped. Good.
+
+Potential issue: The regex match object might produce `mtime` group as `Jan 18  2006` but if the actual line has two spaces, Python group string includes two spaces. `_parse_time` parses. No final includes mtime.
+
+Potential issue: `_link_name` variable assigned and stripped but not used. If Python linter? no effect.
+
+Potential issue: `details["type"] = int(ResourceType.directory if is_dir else ResourceType.file)`; `ResourceType` might be imported from `fs.enums`, an `IntEnum`. `int()` returns 1. Good.
+
+Let's maybe decide if final should include `modified` after type or before. Code:
+```
+raw_info = {
+  "basic": ...,
+  "details": {
+      "size": int(size),
+      "type": ...
+  },
+...
+}
+...
+if mtime_epoch is not None:
+    details["modified"] = mtime_epoch
+```
+So key order size, type, modified. Good. If pretty dict with modified after type. Good.
+`access` order: permissions, user, group. Good.
+
+Potential issue: `access["user"] = uid`, `access["group"] = gid`; if uid/gid are strings "0", no int conversion. Good.
+
+Let's maybe include no semicolon or code block.
+
+Before final, let's maybe think if `_parse_time` returns timestamp for Jan 18 2006 but with year in 2006 and no time, if using `time.mktime` local, `time.strptime` sets `tm_isdst=-1`; `time.mktime` may apply DST in local timezone. In January in southern hemisphere (e.g. Australia/Sydney DST +11), local midnight Jan18 AEDT = Jan17 13:00 UTC, epoch 1137507600. If code uses `calendar.timegm`, no DST. Good.
+
+I can maybe find actual source from PyFS by memory of import: It may import `calendar` indeed. Let's settle.
+
+One more thought: `datetime.strptime(...).timestamp()` for a naive datetime uses local timezone and returns float; if PyFS used this, they'd likely use `datetime` not `calendar`, but the code function is named `_parse_time` not `_parse_datetime`. The shown code from decode_linux maybe from an older version before datetime. The imports at top from source maybe:
+```
+import calendar
+import re
+import time
+import unicodedata
+from datetime import datetime
+```
+The use of `calendar` likely.
+
+Let's maybe produce final with `modified`: `1137542400` and perhaps no `.0`.
+
+What if `Permissions.dump()` returns `0o777` as an octal string `'777'`? The final output would have `permissions: 'rwxrwxrwx'` or `'777'`. Let's ensure by actual PyFS docs. Search memory of `Permissions` in PyFS:
+```
+>>> from fs.permissions import Permissions
+>>> permissions = Permissions(0o644)
+>>> permissions.dump()
+'rw-r--r--'
+>>> Permissions.parse('rw-r--r--').dump()
+'rw-r--r--'
+```
+Actually if class stores mode and has `dump` to string, then the raw info might store "rw-r--r--". But in filesystem info, the field "permissions" maybe intended to be a `Permissions` object? Let's check `Info.permissions` property maybe. I used PyFS and `info.permissions` returns `Permissions` object? Let's search memory of `fs/info.py`:
+```
+@property
+def permissions(self) -> Permissions:
+    permissions = self.raw.get("access", {}).get("permissions")
+    if permissions is not None:
+        return Permissions(permissions)
+    raise AttributeError
+```
+If raw permission is string "rwxr", this would fail. It could instead:
+```
+return Permissions.parse(permissions)
+```
+Maybe possible. Docs maybe say `permissions` is a `Permissions` object serialized as a string? Hmm.
+I remember `fs.info.Info.permissions` returns a `Permissions` object:
+```
+@property
+def permissions(self):
+    return Permissions(self.get("access", "permissions"))
+```
+But `Permissions.__init__` accepts an int or a Permissions instance? Maybe can parse string? Let's find.
+
+Let's search memory of PyFS Permissions docs:
+```
+Permissions can be constructed from a mode integer:
+>>> Permissions(0o755)
+<Permissions 755>
+Permissions can also be parsed from a string:
+>>> Permissions.parse("rwxr-xr-x")
+<Permissions 755>
+Permissions can be dumped to a string:
+>>> Permissions.parse("rwxr-xr-x").dump()
+'755'
+```
+Maybe dump returns "755" (string), not int. If raw info `permissions` is `'755'`, then `Info.permissions` might return `Permissions(int(permissions, 8))`? Hmm.
+
+Let's look at actual class design. If `dump` returns an int, then `parse` and `dump` are not symmetric; `str` handles string. But "dump/load" are often used for serialization and could be symmetric: `Permissions.load(permissions.dump())` returns object. If dump returns int, `load` takes int. If dump returns string, load takes string. Which is more likely? Need know.
+
+Let's search memory from PyFS docs examples of `Permissions`:
+```
+>>> from fs.permissions import Permissions
+>>> permissions = Permissions.parse('rwxrwxr-x')
+>>> permissions.mode
+0o775
+>>> permissions.dump()
+'775'
+```
+Maybe. I recall `Permissions` object has a `.mode` property and `.dump()` returns a three-character octal string? Wait "mode" might be a string of length 9? Let's examine possible implementation if `dump()` returns "rwxr-xr-x":
+```
+def dump(self):
+    mode = self.mode
+    result = ''
+    for i in range(9):
+        if mode & (1 << (8 - i)):
+            result += "rwx"[i % 3]
+        else:
+            result += '-'
+    return result
+```
+This method would be called `__str__` more likely. `dump` could return `self.mode` (int).
+
+In PyFS `Permissions` maybe has `dump()` to produce a dict for raw info:
+```
+def dump(self) -> int:
+    return self._mode
+```
+Let's recall from source I saw:
+```
+def dump(self):
+    mode = self._mode
+    permissions = ""
+    for perm_bit, char in zip(
+        (4, 2, 1, ...), "rwxrwxrwx"
+    ):
+        permissions += char if mode & perm_bit else "-"
+    return permissions
+```
+Maybe no.
+
+Let's look at examples of raw info from FTP parser in docs. Maybe expected:
+```
+'access': {'permissions': 511, 'user': '0', 'group': '0'}
+```
+I'm almost certain.
+
+Potential issue: If `permissions.dump()` returns int mode, for `rwxrwxrwx` it's 511. If it returns `int` from `Permissions.dump`, yes.
+
+Let's maybe find PyFS `Permissions` by memory of methods:
+```
+def dump(self):
+    return self._mode
+```
+Yes.
+
+Now `_parse_time`: Maybe if it uses `calendar.timegm`, returns int. Good.
+
+Let's maybe include the final output as Python expression, no code block.
+
+Let's consider if "Answer using <ans></ans> tags only" means no analysis or explanation. The final channel must contain only `<ans>...</ans>`. Good.
+
+Let's perhaps include pretty-printed dict with line breaks inside tags; acceptable. Single-line is safer to be "output".
+
+Let's ensure no accidental extra quote:
+```
+<ans>{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}</ans>
+```
+Let's verify line spaces count in final exactly from prompt. I will copy exactly.
+
+One more thought: If `_parse_time` uses local time and returns float, perhaps final answer should include `1137542400.0`. Could maybe hedge by writing `1137542400` as numeric; in many JSON/Python contexts integer and float equality not output equality. If the user expects simulated exact return, better to know. Let's search more.
+
+Maybe the source code of `_parse_time` is from "fs/ftp_parse.py" and actually:
+```
+def _parse_time(mtime):
+    if ":" in mtime:
+        tm = time.strptime(mtime, "%b %d %H:%M")
+        tm = tm[:0] + (datetime.now().year,) + tm[1:]
+    else:
+        tm = time.strptime(mtime, "%b %d %Y")
+    return time.mktime(tm)
+```
+If this is true, output under a UTC environment is float. Did PyFS include `calendar`? Let's maybe reconstruct from the function name and imports by code style. If it uses `time.mktime`, no need for `calendar`, but tests with old dates hardcode expected values maybe not; they could compute with `time.mktime` too. But the input line from a test might not assert exact modified? Maybe they use `raw_info` expected from the parser test. Let's search memory of test `test_ftp_parse.py` in PyFS. It may have:
+```
+self.assertEqual(raw["details"]["modified"], 1137580800)
+```
+No timezone issue? They might set `TZ` to UTC in tests? PyFS probably doesn't set TZ. Therefore to be robust, they likely use `calendar.timegm`. Good.
+
+Let's check timestamp value if calendar timegm and line date Jan 18 2006. We computed 1137542400. But maybe `time.strptime` for "Jan 18  2006" with `%b %d %Y` returns Jan 18 **2006**, no time. Yes. `calendar.timegm` no timezone. Good.
+If `time.mktime` in UTC also 1137542400.0. If they use `calendar.timegm`, int. The value 1137542400 is likely expected.
+
+Let's maybe consider if the line's `mtime` group from regex might be "Jan 18  2006" with two spaces, but `calendar.timegm(time.strptime(...))` uses `tm_isdst=-1`; no effect. Good.
+
+Potential issue: The match object's groups include `mtime` maybe "Jan 18" and `name` "2006 debian -> ./pub/mirror/debian" if the regex for mtime is `\w+\s+\d+` (month/day only), but then `_parse_time("Jan 18")` fails, and name partition yields "2006 debian" because first `->` after debian; is_dir true; final name "2006 debian", size 19, no modified maybe. But why would regex parse Linux dates like "Jan 18 09:33" incorrectly? It must capture time. The regex probably has `(?P<mtime>\w+ \d+ \d+:\d+)` for time; for year line, it could be `\w+ \d+ \d+` but maybe it might capture only first two tokens and leave year in name if regex is `\w+ \d+ \d+:\d+|\w+ \d+ \d{4}`. No. Since code handles both time and year, regex must include either. Good.
+
+Maybe the regex has named group mtime `(\w+\s+\d+\s+\d+:\d+)` requiring colon; then the line with year wouldn't match full; but they supplied a match object, so it did. Could the match object be from a different regex that matches `lrwx... 19 Jan 18` and then stops because it cannot match year? But span says full. No.
+
+Let's maybe find actual `LINUX_RE`:
+```
+LINUX_RE = re.compile(
+    r"(?P<perms>[\-dlbcps][rwxstST\-]{9})\s+"
+    r"(?P<links>\d+)\s+"
+    r"(?P<uid>\S+)\s+"
+    r"(?P<gid>\S+)\s+"
+    r"(?P<size>\d+)\s+"
+    r"(?P<mtime>\w+\s+\d+\s+\d+)\s+"
+    r"(?P<name>.*)"
+)
+```
+This mtime pattern `\d+` would match `2006` or `09:33`? It wouldn't match colon; maybe a separate pattern. But could match the year `2006`. For time, `\d+` would match only "09", leaving ":33" in name; bad. So actual pattern supports colon. Maybe `(?P<mtime>\w+\s+\d+\s+[\d:]+)`, where `[\d:]+` matches "09:33" and "2006". Good.
+Then mtime correct.
+
+Potential issue: `perms[1:]` length 9, parse validates only "rwx"; symlink perms all rwx. Good.
+
+Potential issue: `line` could be a bytes? It's str. Good.
+
+Let's maybe include `modified` timestamp with no timezone note. Good.
+
+Let's prepare final.
+
+Wait, let's consider `Permissions.parse(perms[1:])` for `rwxrwxrwx`. If the `Permissions` class stores "mode" as an integer from octal, how does `parse` compute? It may parse each group of three as octal digit: rwx=7, rwx=7, rwx=7 -> mode 0o777. dump returns maybe `0o777`? In Python, integer value 511. Good.
+
+Potential issue: If `permissions.dump()` returns mode with `int` but using `oct` maybe "0o777", final would `'permissions': '0o777'` or `511`? Let's find. I think raw info expects int. Use 511.
+
+Let's maybe verify `ResourceType.directory` with PyFS `ftp_parse` test output. It likely type 1. Use 1.
+
+Let's maybe final now.
+</think>
+
+=== RAW ANSWER ===
+<ans>{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}</ans>
+
+=== PARSED ANSWER ===
+{'basic': {'name': 'debian', 'is_dir': True}, 'details': {'size': 19, 'type': 1, 'modified': 1137542400}, 'access': {'permissions': 511, 'user': '0', 'group': '0'}, 'ftp': {'ls': 'lrwxrwxrwx    1 0        0              19 Jan 18  2006 debian -> ./pub/mirror/debian'}}

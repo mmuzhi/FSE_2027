@@ -1,0 +1,72 @@
+class Student:
+    def __init__(self, name, major):
+        self.name = name
+        self.major = major
+
+    def get_name(self):
+        return self.name
+
+    def get_major(self):
+        return self.major
+
+    def __eq__(self, other):
+        if self is other:
+            return True
+        if other is None or type(self) is not type(other):
+            return False
+        return self.name == other.name and self.major == other.major
+
+    def __hash__(self):
+        return hash((self.name, self.major))
+
+    def __repr__(self):
+        return f"Student(name={self.name!r}, major={self.major!r})"
+
+
+class ClassRegistrationSystem:
+    def __init__(self):
+        self.students = []
+        self.students_registration_classes = {}
+
+    def register_student(self, student):
+        if student in self.students:
+            return 0
+        else:
+            self.students.append(student)
+            return 1
+
+    def register_class(self, student_name, class_name):
+        if student_name in self.students_registration_classes:
+            self.students_registration_classes[student_name].append(class_name)
+        else:
+            self.students_registration_classes[student_name] = [class_name]
+        return self.students_registration_classes[student_name]
+
+    def get_students_by_major(self, major):
+        student_list = []
+        for student in self.students:
+            if student.get_major() == major:
+                student_list.append(student.get_name())
+        return student_list
+
+    def get_all_major(self):
+        major_set = set()
+        for student in self.students:
+            major_set.add(student.get_major())
+        return list(major_set)
+
+    def get_most_popular_class_in_major(self, major):
+        class_count = {}
+        for student in self.students:
+            if student.get_major() == major:
+                classes = self.students_registration_classes.get(student.get_name(), [])
+                for class_name in classes:
+                    class_count[class_name] = class_count.get(class_name, 0) + 1
+        return max(class_count.items(), key=lambda item: item[1])[0]
+
+    # Setter methods for tests
+    def set_students(self, students):
+        self.students = students
+
+    def set_student_classes(self, student_classes):
+        self.students_registration_classes = student_classes
