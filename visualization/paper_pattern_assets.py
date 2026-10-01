@@ -1,8 +1,8 @@
 """Generate the paper-ready RQ3.1 task-classification figure.
 
 This script regenerates the RQ3.1 task classification figure used by
-``_ICSE_2027__COT_Analysis/main.tex``. It reads quantitative results from
-``data/derived_cot/rq3_task_classification`` and writes outputs to the paper directory.
+``_ICSE_2027__COT_Analysis/main.tex``. It reads the figure data from
+``visualization/rq3_1_plot_data.json`` and writes outputs to the paper directory.
 The RQ1 pattern table (``tables/rq1_pattern_families.tex``) is maintained
 directly as LaTeX and is no longer generated here.
 
@@ -18,12 +18,6 @@ import json
 from pathlib import Path
 
 
-MODEL_LABELS = {
-    "r1": "R1-0528",
-    "qwen": "R1-Qwen3-8B",
-}
-
-
 def get_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -35,35 +29,15 @@ def write_rq3_classifier_figure(repo_root: Path, paper_dir: Path) -> list[Path]:
     except ModuleNotFoundError as exc:
         raise SystemExit("matplotlib and numpy are required to generate the RQ3.1 figure.") from exc
 
-    results_dir = repo_root / "data" / "derived_cot" / "rq3_task_classification"
-    r1_classifier = json.loads((results_dir / "r1/classifier_analysis_4class/classifier_results.json").read_text(encoding="utf-8"))
-    qwen_classifier = json.loads((results_dir / "qwen/classifier_analysis_4class/classifier_results.json").read_text(encoding="utf-8"))
-
-    model_labels = [MODEL_LABELS["r1"], MODEL_LABELS["qwen"]]
-    logistic_acc = np.array(
-        [
-            r1_classifier["logistic_regression_accuracy"],
-            qwen_classifier["logistic_regression_accuracy"],
-        ]
-    )
-    forest_acc = np.array(
-        [
-            r1_classifier["random_forest_accuracy"],
-            qwen_classifier["random_forest_accuracy"],
-        ]
-    )
-    logistic_err = np.array(
-        [
-            r1_classifier["logistic_regression_std"],
-            qwen_classifier["logistic_regression_std"],
-        ]
-    )
-    forest_err = np.array(
-        [
-            r1_classifier["random_forest_std"],
-            qwen_classifier["random_forest_std"],
-        ]
-    )
+    data_path = repo_root / "visualization" / "rq3_1_plot_data.json"
+    plot_data = json.loads(data_path.read_text(encoding="utf-8"))
+    models = plot_data["models"]
+    model_labels = [model["label"] for model in models]
+    logistic_acc = np.array([model["logistic_regression"]["mean"] for model in models])
+    forest_acc = np.array([model["random_forest"]["mean"] for model in models])
+    logistic_err = np.array([model["logistic_regression"]["std"] for model in models])
+    forest_err = np.array([model["random_forest"]["std"] for model in models])
+    chance = float(plot_data.get("chance", 0.25))
 
     plt.rcParams.update(
         {
@@ -86,10 +60,10 @@ def write_rq3_classifier_figure(repo_root: Path, paper_dir: Path) -> list[Path]:
     output_dir = paper_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, ax_acc = plt.subplots(figsize=(3.45, 1.85))
+    fig, ax_acc = plt.subplots(figsize=(4.8, 2.0))
     fig.patch.set_facecolor("white")
-    x_acc = np.array([0.0, 0.72])
-    width = 0.28
+    x_acc = np.arange(len(models), dtype=float) * 0.92
+    width = 0.27
     bar_gap = 0.01
 
     c1 = colors["logistic"]
@@ -124,11 +98,11 @@ def write_rq3_classifier_figure(repo_root: Path, paper_dir: Path) -> list[Path]:
         zorder=3
     )
 
-    ax_acc.axhline(0.25, color="gray", linestyle=(0, (5, 4)), linewidth=0.65, zorder=0)
+    ax_acc.axhline(chance, color="gray", linestyle=(0, (5, 4)), linewidth=0.65, zorder=0)
     ax_acc.text(
-        1.08,
-        0.27,
-        "Chance (25%)",
+        x_acc[-1] + 0.42,
+        chance + 0.025,
+        f"Chance ({chance:.0%})",
         ha="left",
         va="bottom",
         fontsize=6.2,
@@ -150,7 +124,7 @@ def write_rq3_classifier_figure(repo_root: Path, paper_dir: Path) -> list[Path]:
                 color="black",
             )
 
-    ax_acc.set_xlim(-0.33, 1.42)
+    ax_acc.set_xlim(-0.38, x_acc[-1] + 1.22)
     ax_acc.set_ylim(0, 1.05)
     ax_acc.set_xticks(x_acc)
     ax_acc.set_xticklabels(model_labels)
