@@ -181,7 +181,7 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
     )
 
     fig, axes = plt.subplots(2, 1, figsize=(7.4, 6.2))
-    fig.subplots_adjust(left=0.22, right=0.995, top=0.91, bottom=0.08, hspace=0.43)
+    fig.subplots_adjust(left=0.22, right=0.995, top=0.95, bottom=0.08, hspace=0.25)
 
     for ax, model, panel_label in zip(axes, ("r1", "qwen"), ("a", "b")):
         entries = select_butterfly_entries(rows, model)
@@ -215,8 +215,8 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
         ticks = list(range(-limit, limit + 1, 20))
         ax.set_xticks(ticks)
         ax.set_xticklabels([str(abs(tick)) for tick in ticks])
-        ax.set_xlabel("Support (%)")
-        ax.set_title(f"({panel_label}) {MODEL_LABELS[model]}", pad=6)
+        ax.set_xlabel("Support (%)", labelpad=1)
+        ax.set_title(f"({panel_label}) {MODEL_LABELS[model]}", pad=3)
         ax.grid(axis="x", color="#dddddd", linewidth=0.5, alpha=0.7)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
