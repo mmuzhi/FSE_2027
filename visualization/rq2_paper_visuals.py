@@ -224,8 +224,8 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
     from matplotlib.patches import Patch
 
     handles = [
-        Patch(facecolor=INVALID_COLOR, label="Anti-pattern main support"),
-        Patch(facecolor=VALID_COLOR, label="Positive-pattern main support"),
+        Patch(facecolor=INVALID_COLOR, label="Negative pattern main support"),
+        Patch(facecolor=VALID_COLOR, label="Positive pattern main support"),
         Patch(facecolor="#bbbbbb", alpha=0.45, label="Contrast support (opposite side)"),
     ]
     fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.03))
