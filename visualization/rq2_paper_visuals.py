@@ -169,12 +169,12 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "font.size": 9,
-            "axes.titlesize": 10,
-            "axes.labelsize": 9,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 8,
+            "font.size": 7.5,
+            "axes.titlesize": 7.5,
+            "axes.labelsize": 7.2,
+            "xtick.labelsize": 6.8,
+            "ytick.labelsize": 6.4,
+            "legend.fontsize": 6.8,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
@@ -202,9 +202,9 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
 
         for yi, row in zip(y, entries):
             if row.kind == "positive":
-                ax.text(row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=7)
+                ax.text(row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=6.5)
             else:
-                ax.text(-row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=7)
+                ax.text(-row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=6.5)
 
         ax.set_yticks(y)
         ax.set_yticklabels(labels)
