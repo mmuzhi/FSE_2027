@@ -1,4 +1,4 @@
-"""RQ3.1 task classification with action-trace features."""
+"""RQ3.1 task-identification probe with action-trace features."""
 import numpy as np
 from pathlib import Path
 from collections import Counter
@@ -189,6 +189,6 @@ def train_and_evaluate(all_samples: dict[str, list[COTSample]], output_dir: Path
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[2]
     base_dir = root / "data" / "derived_cot" / "rq1_segmented"
-    output_dir = root / "data" / "derived_cot" / "rq3_task_classification" / "default" / "classifier_analysis"
+    output_dir = root / "data" / "derived_cot" / "rq3_task_identification" / "default" / "classifier_analysis"
     all_samples = load_all_tasks(base_dir)
     train_and_evaluate(all_samples, output_dir)

@@ -247,7 +247,7 @@ def main() -> None:
     events = replay_samples(samples, segmentation_map, task, config)
 
     output = Path(args.output) if args.output else (
-        ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "replay_logs" / f"{task}_{model}_{config.get('policy_name', 'global')}.jsonl"
+        ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "replay_logs" / f"{task}_{model}_{config.get('policy_name', 'global')}.jsonl"
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in events), encoding="utf-8")

@@ -1,6 +1,6 @@
-"""Generate the paper-ready RQ3.1 task-classification figure.
+"""Generate the paper-ready RQ3.1 task-identification figure.
 
-This script regenerates the RQ3.1 task classification figure used by
+This script regenerates the RQ3.1 task-identification figure used by
 ``_ICSE_2027__COT_Analysis/main.tex``. It reads the figure data from
 ``visualization/rq3_1_plot_data.json`` and writes outputs to the paper directory.
 The RQ1 pattern table (``tables/rq1_pattern_families.tex``) is maintained
@@ -148,8 +148,8 @@ def write_rq3_classifier_figure(repo_root: Path, paper_dir: Path) -> list[Path]:
     )
 
     fig.subplots_adjust(left=0.15, right=0.98, top=0.82, bottom=0.15)
-    pdf_path = output_dir / "rq3_task_classification.pdf"
-    png_path = output_dir / "rq3_task_classification.png"
+    pdf_path = output_dir / "rq3_task_identification.pdf"
+    png_path = output_dir / "rq3_task_identification.png"
     fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02, facecolor="white", transparent=False)
     fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0.02, facecolor="white", transparent=False)
     plt.close(fig)

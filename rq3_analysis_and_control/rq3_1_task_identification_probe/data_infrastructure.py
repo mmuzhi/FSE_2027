@@ -1,4 +1,4 @@
-"""Data loading helpers for RQ3.1 task classification."""
+"""Data loading helpers for the RQ3.1 task-identification probe."""
 import sys
 from pathlib import Path
 
@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rq1_macro_patterns.analysis.data_infrastructure import (  # noqa: E402
+from rq1_general_patterns.analysis.data_infrastructure import (  # noqa: E402
     CATEGORIES,
     COTSample,
     compress_sequence,

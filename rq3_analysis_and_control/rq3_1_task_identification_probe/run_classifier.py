@@ -13,7 +13,7 @@ def main() -> None:
         if index:
             print(f"\n{'=' * 60}\n")
         print(f"=== {label} (4-class) ===")
-        output_dir = ROOT / "data" / "derived_cot" / "rq3_task_classification" / model / "classifier_analysis_4class"
+        output_dir = ROOT / "data" / "derived_cot" / "rq3_task_identification" / model / "classifier_analysis_4class"
         all_samples = load_all_tasks(BASE_DIR, model=model)
         print(f"Tasks: {list(all_samples.keys())}")
         train_and_evaluate(all_samples, output_dir)

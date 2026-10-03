@@ -95,11 +95,11 @@ def default_eval_path(task: str, model: str) -> Path | None:
             [
                 ROOT / "data" / "CodeSense" / "test" / task / model / "result_rechecked.json",
                 ROOT / "data" / "CodeSense" / "test" / task / model / "result.json",
-                ROOT / "rq2_micro_patterns" / "test" / task / model / "result.json",
+                ROOT / "rq2_positive_negative_patterns" / "test" / task / model / "result.json",
             ]
         )
     else:
-        candidates.append(ROOT / "rq2_micro_patterns" / "test" / task / model / "results.json")
+        candidates.append(ROOT / "rq2_positive_negative_patterns" / "test" / task / model / "results.json")
     for candidate in candidates:
         if candidate.exists():
             return candidate

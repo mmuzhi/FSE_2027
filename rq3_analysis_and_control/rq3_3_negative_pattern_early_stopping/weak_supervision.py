@@ -119,7 +119,7 @@ def main() -> None:
     parser.add_argument("--task", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--input", action="append", default=[])
-    parser.add_argument("--output", default=str(ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "weak_supervision" / "micro_units.jsonl"))
+    parser.add_argument("--output", default=str(ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "weak_supervision" / "micro_units.jsonl"))
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 

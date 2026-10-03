@@ -1,6 +1,6 @@
 import unittest
 
-from rq1_macro_patterns.clean_incomplete_traces import TASKS, incomplete_reasons
+from rq1_general_patterns.clean_incomplete_traces import TASKS, incomplete_reasons
 
 
 class CleanIncompleteTracesTest(unittest.TestCase):

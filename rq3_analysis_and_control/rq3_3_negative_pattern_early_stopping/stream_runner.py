@@ -235,7 +235,7 @@ def build_prompt_for_sample(sample: dict[str, Any], args: argparse.Namespace) ->
     meta = {
         "task": task,
         "prompt_source": "rq1_default",
-        "source_script": f"rq1_macro_patterns/{task}_cot.py",
+        "source_script": f"rq1_general_patterns/{task}_cot.py",
     }
     if task == "generation":
         question_content = sample.get("question_content", "")
@@ -1006,9 +1006,9 @@ def run(args: argparse.Namespace) -> None:
     if args.output_dir:
         base_output_dir = Path(args.output_dir)
     elif task == "translation":
-        base_output_dir = ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "output" / model_slug / "translation"
+        base_output_dir = ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "output" / model_slug / "translation"
     else:
-        base_output_dir = ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "output" / model_slug / task
+        base_output_dir = ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "output" / model_slug / task
 
     if task == "translation":
         txt_output_dir = base_output_dir

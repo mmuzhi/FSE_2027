@@ -16,14 +16,14 @@ This directory stores all model-generated CoT traces and paper-related intermedi
   Pattern-mining outputs and RQ2 summaries.
 - `rq2_eval/`
   Evaluation files used to compare judge outputs with task correctness.
-- `rq3_task_classification/`
+- `rq3_task_identification/`
   Saved classifier outputs for RQ3.1.
 - `rq3_prompting/`
   Baseline and pattern-guided prompting outputs for RQ3.2.
-- `rq3_early_stopping/`
+- `rq3_negative_pattern_early_stopping/`
   Early-stopping outputs and evaluation files for RQ3.3.
 
 ## Rule
 
-Keep code under `rq1_macro_patterns/`, `rq2_micro_patterns/`, and `rq3_applications/`.
+Keep code under `rq1_general_patterns/`, `rq2_positive_negative_patterns/`, and `rq3_analysis_and_control/`.
 Keep generated artifacts and intermediate experiment results under `data/derived_cot/`.

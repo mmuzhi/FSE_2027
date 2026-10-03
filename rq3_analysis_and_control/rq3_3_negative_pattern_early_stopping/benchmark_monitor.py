@@ -1,7 +1,7 @@
 """Replay local RQ3.3 monitor work without making model/API requests.
 
 Run from the repository root:
-    python rq3_applications/rq3_3_pattern_aware_early_stopping/benchmark_monitor.py
+    python rq3_analysis_and_control/rq3_3_negative_pattern_early_stopping/benchmark_monitor.py
 
 The fixed sample is the first ten records with nonempty ``cot`` in each Qwen
 early-stopping JSONL file. Each trace is replayed in 25-character chunks. This
@@ -34,7 +34,7 @@ EXPECTED_SEGMENTS = 0
 MIN_MEASURED_CPU_NS = 125_000_000  # Amortize the coarse CPU clock on Windows.
 MAX_REPEATS = 4096
 POLICY_PATH = HERE / "configs" / "task_aware_policy.json"
-DATA_ROOT = ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "output" / "qwen"
+DATA_ROOT = ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "output" / "qwen"
 
 
 def first_nonempty_traces(path: Path) -> list[tuple[str, str]]:

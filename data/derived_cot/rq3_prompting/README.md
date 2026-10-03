@@ -6,4 +6,4 @@ Structure:
 - `eval/<prompt_method>/<task>/<model>/`: evaluation outputs for generated results.
 - `archive/`: superseded or pre-cleanup outputs kept for reference.
 
-Keep generated text/code artifacts here, not under `rq3_applications/`.
+Keep generated text/code artifacts here, not under `rq3_analysis_and_control/`.

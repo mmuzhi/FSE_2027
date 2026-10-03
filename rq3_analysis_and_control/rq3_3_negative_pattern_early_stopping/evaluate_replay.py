@@ -173,7 +173,7 @@ def main() -> None:
     events = list(iter_jsonl(input_path))
     summary = summarize(events)
     output_path = Path(args.output) if args.output else (
-        ROOT / "data" / "derived_cot" / "rq3_early_stopping" / "replay_metrics" / f"{input_path.stem}.json"
+        ROOT / "data" / "derived_cot" / "rq3_negative_pattern_early_stopping" / "replay_metrics" / f"{input_path.stem}.json"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

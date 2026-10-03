@@ -2,7 +2,7 @@ import unittest
 import inspect
 from pathlib import Path
 
-from rq3_applications.rq3_2_pattern_guided_prompting import prompt_utils
+from rq3_analysis_and_control.rq3_2_pattern_guided_prompting import prompt_utils
 
 
 TASK_ARGUMENTS = {
