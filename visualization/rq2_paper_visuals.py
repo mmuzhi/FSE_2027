@@ -172,16 +172,16 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
             "font.size": 7.5,
             "axes.titlesize": 7.5,
             "axes.labelsize": 7.2,
-            "xtick.labelsize": 6.8,
-            "ytick.labelsize": 6.4,
+            "xtick.labelsize": 6.4,
+            "ytick.labelsize": 5.9,
             "legend.fontsize": 6.8,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
     )
 
-    fig, axes = plt.subplots(2, 1, figsize=(7.4, 6.2))
-    fig.subplots_adjust(left=0.22, right=0.995, top=0.95, bottom=0.08, hspace=0.25)
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 2.45))
+    fig.subplots_adjust(left=0.18, right=0.995, top=0.80, bottom=0.17, wspace=0.38)
 
     for ax, model, panel_label in zip(axes, ("r1", "qwen"), ("a", "b")):
         entries = select_butterfly_entries(rows, model)
@@ -202,12 +202,31 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
 
         for yi, row in zip(y, entries):
             if row.kind == "positive":
-                ax.text(row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=6.5)
+                ax.text(
+                    row.main_pct - 0.8,
+                    yi,
+                    f"{row.main_pct:.1f}",
+                    va="center",
+                    ha="right",
+                    fontsize=6.2,
+                    color="white",
+                    zorder=4,
+                )
             else:
-                ax.text(-row.main_pct + 1.0, yi, f"{row.main_pct:.1f}", va="center", ha="left", fontsize=6.5)
+                ax.text(
+                    -row.main_pct + 0.8,
+                    yi,
+                    f"{row.main_pct:.1f}",
+                    va="center",
+                    ha="left",
+                    fontsize=6.2,
+                    color="white",
+                    zorder=4,
+                )
 
         ax.set_yticks(y)
         ax.set_yticklabels(labels)
+        ax.tick_params(axis="y", pad=1.5)
         ax.set_ylim(y.min() - 0.7, y.max() + 0.7)
         max_value = max([row.main_pct for row in entries] + [row.contrast_pct for row in entries])
         limit = max(25, int((max_value + 9) // 10) * 10)
@@ -215,8 +234,8 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
         ticks = list(range(-limit, limit + 1, 20))
         ax.set_xticks(ticks)
         ax.set_xticklabels([str(abs(tick)) for tick in ticks])
-        ax.set_xlabel("Support (%)", labelpad=1)
-        ax.set_title(f"({panel_label}) {MODEL_LABELS[model]}", pad=3)
+        ax.set_xlabel("Support (%)", labelpad=0)
+        ax.set_title(f"({panel_label}) {MODEL_LABELS[model]}", pad=2)
         ax.grid(axis="x", color="#dddddd", linewidth=0.5, alpha=0.7)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
@@ -228,7 +247,7 @@ def write_butterfly_figure(paper_dir: Path) -> list[Path]:
         Patch(facecolor=VALID_COLOR, label="Positive pattern main support"),
         Patch(facecolor="#bbbbbb", alpha=0.45, label="Contrast support (opposite side)"),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.03))
+    fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.99))
 
     fig_dir = paper_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
